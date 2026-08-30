@@ -1,0 +1,21 @@
+# Dependencies and build output
+node_modules/
+out/
+dist/
+coverage/
+.nyc_output/
+.vscode-test/
+*.vsix
+
+# Local credentials and publishing configuration
+.env
+.env.*
+!.env.example
+.npmrc
+.vsce/
+*.pem
+*.key
+
+# Local editor and OS files
+*.log
+.DS_Store

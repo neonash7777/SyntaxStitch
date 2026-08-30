@@ -1,0 +1,270 @@
+{
+  "name": "syntaxstitch",
+  "displayName": "SyntaxStitch",
+  "description": "Stops mismatched brackets, quotes, tags, and indentation from turning AI edits into cascading syntax failures.",
+  "version": "0.0.1",
+  "publisher": "BrockNash",
+  "icon": "media/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neonash7777/SyntaxStitch.git"
+  },
+  "homepage": "https://github.com/neonash7777/SyntaxStitch#readme",
+  "bugs": {
+    "url": "https://github.com/neonash7777/SyntaxStitch/issues"
+  },
+  "keywords": [
+    "AI",
+    "brackets",
+    "braces",
+    "parenthesis",
+    "parentheses",
+    "quotes",
+    "matching",
+    "syntax",
+    "repair",
+    "fix",
+    "indent",
+    "indentation",
+    "token",
+    "tokens",
+    "consumption",
+    "reducer",
+    "Copilot",
+    "productivity",
+    "HTML",
+    "CSS",
+    "Python"
+  ],
+  "engines": {
+    "vscode": "^1.134.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "syntaxstitch.showMenu",
+        "title": "SyntaxStitch: Show Actions"
+      },
+      {
+        "command": "syntaxstitch.toggle",
+        "title": "SyntaxStitch: Toggle On/Off"
+      },
+      {
+        "command": "syntaxstitch.selectMatchingStructure",
+        "title": "SyntaxStitch: Select Matching Structure"
+      },
+      {
+        "command": "syntaxstitch.selectInnerStructure",
+        "title": "SyntaxStitch: Select Inner Structure"
+      },
+      {
+        "command": "syntaxstitch.structuralTab",
+        "title": "SyntaxStitch: Structural Tab"
+      },
+      {
+        "command": "syntaxstitch.showStatistics",
+        "title": "SyntaxStitch: Show Repair Statistics"
+      },
+      {
+        "command": "syntaxstitch.configurePairLabels",
+        "title": "SyntaxStitch: Configure Pair Labels"
+      },
+      {
+        "command": "syntaxstitch.resetStatistics",
+        "title": "SyntaxStitch: Reset Repair Count"
+      },
+      {
+        "command": "syntaxstitch.rebuildShadowIndex",
+        "title": "SyntaxStitch: Rebuild Shadow Index"
+      },
+      {
+        "command": "syntaxstitch.inspectActiveDocument",
+        "title": "SyntaxStitch: Inspect Active Document"
+      },
+      {
+        "command": "syntaxstitch.showOutput",
+        "title": "SyntaxStitch: Show Reconciliation Output"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "syntaxstitch.deleteLeft",
+        "key": "backspace",
+        "when": "editorTextFocus && !editorReadonly"
+      },
+      {
+        "command": "syntaxstitch.deleteRight",
+        "key": "delete",
+        "when": "editorTextFocus && !editorReadonly"
+      },
+      {
+        "command": "syntaxstitch.structuralTab",
+        "key": "tab",
+        "when": "editorTextFocus && !editorReadonly && !inSnippetMode && !suggestWidgetVisible && !inlineSuggestionVisible && !editorTabMovesFocus"
+      },
+      {
+        "command": "syntaxstitch.selectMatchingStructure",
+        "key": "ctrl+alt+shift+s",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "syntaxstitch.selectMatchingStructure",
+        "key": "cmd+pageup",
+        "when": "editorTextFocus && isMac"
+      },
+      {
+        "command": "syntaxstitch.selectInnerStructure",
+        "key": "cmd+pagedown",
+        "when": "editorTextFocus && editorHasSelection && isMac"
+      }
+    ],
+    "configuration": {
+      "title": "SyntaxStitch",
+      "properties": {
+        "syntaxstitch.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Heal edits that remove exactly one half of an indexed structural pair."
+        },
+        "syntaxstitch.pairLabels": {
+          "type": "string",
+          "enum": [
+            "off",
+            "active",
+            "all"
+          ],
+          "enumDescriptions": [
+            "Hide pair ownership labels.",
+            "Show the innermost pair containing the cursor.",
+            "Show ownership labels at multiline, line-leading closing braces and tags."
+          ],
+          "default": "all",
+          "description": "Render virtual labels showing which opening declaration owns each closing boundary."
+        },
+        "syntaxstitch.fixClosingIndentation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Align a changed line-leading closing brace with the indentation of its matched opening brace."
+        },
+        "syntaxstitch.structures": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "brace",
+              "tag",
+              "quote",
+              "indent"
+            ]
+          },
+          "uniqueItems": true,
+          "default": [
+            "brace",
+            "tag",
+            "quote",
+            "indent"
+          ],
+          "description": "Structural pair types SyntaxStitch may repair, including language-scoped quotes."
+        },
+        "syntaxstitch.languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "javascript",
+            "javascriptreact",
+            "typescript",
+            "typescriptreact",
+            "json",
+            "jsonc",
+            "html",
+            "xml",
+            "vue",
+            "svelte",
+            "astro",
+            "css",
+            "scss",
+            "less",
+            "python",
+            "csharp",
+            "java",
+            "go",
+            "rust"
+          ],
+          "description": "Language identifiers monitored by SyntaxStitch. Use an empty array to monitor every language."
+        },
+        "syntaxstitch.maxFileSizeKB": {
+          "type": "integer",
+          "minimum": 64,
+          "default": 2048,
+          "description": "Maximum UTF-8 document size SyntaxStitch indexes, in kilobytes."
+        },
+        "syntaxstitch.logLevel": {
+          "type": "string",
+          "enum": [
+            "off",
+            "repairs",
+            "verbose"
+          ],
+          "enumDescriptions": [
+            "Do not write structured output.",
+            "Write repairs and errors.",
+            "Write repairs, errors, and state changes."
+          ],
+          "default": "repairs",
+          "description": "Detail written to the SyntaxStitch output channel."
+        },
+        "syntaxstitch.repairCountCooldownMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60000,
+          "default": 5000,
+          "description": "Time in milliseconds during which repeated repairs of the same boundary count as one incident. Set to 0 to count every repair."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "package:vsix": "npm run package && vsce package",
+    "publish:marketplace": "npm run package && vsce publish",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "@types/vscode": "^1.134.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.5.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  }
+}
