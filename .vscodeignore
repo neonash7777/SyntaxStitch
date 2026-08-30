@@ -2,6 +2,7 @@
 .github/**
 .vscode-test/**
 manual-tests/**
+media/icon-source.png
 out/**
 node_modules/**
 src/**

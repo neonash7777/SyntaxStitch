@@ -1,6 +1,6 @@
 # SyntaxStitch
 
-<p align="center"><img src="media/icon.png" width="128" height="128" alt="SyntaxStitch logo: coral and teal braces joined by a gold stitched thread"></p>
+<p align="center"><img src="media/icon.png" width="128" height="128" alt="SyntaxStitch logo: a neon stitched S between colorful code braces"></p>
 
 **Tired of AI breaking your code and wasting more tokens trying to fix mismatched closing glyphs? SyntaxStitch is for you.**
 
