@@ -148,7 +148,7 @@
             "Show ownership labels at multiline, line-leading closing braces and tags."
           ],
           "default": "all",
-          "description": "Render inline pair labels with a large ordinary-click hover menu for folding, selection, and opener navigation."
+          "description": "Render compact inline pair labels; hover the owner for ordinary-click folding and structural selection actions."
         },
         "syntaxstitch.fixClosingIndentation": {
           "type": "boolean",
@@ -248,7 +248,8 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "test:minimum": "VSCODE_TEST_VERSION=1.127.0 vscode-test"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

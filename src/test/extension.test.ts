@@ -322,16 +322,35 @@ suite('Extension integration', () => {
 		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), hint = hints.find(candidate => Array.isArray(candidate.label) && candidate.label.some(part => part.value.includes('function run()')));
 		assert.ok(hint && Array.isArray(hint.label));
 		const parts = hint.label;
-		assert.strictEqual(parts.map(part => part.value).join(''), 'Actions · ← function run() · L1–L3 · 3 lines');
-		const menu = parts[0].tooltip;
+		assert.strictEqual(parts.map(part => part.value).join(''), 'function run() L1↔L3 3 Lines');
+		assert.strictEqual(hint.tooltip, undefined);
+		const menu = parts.find(part => part.value.includes('function run()'))!.tooltip;
 		assert.ok(menu instanceof vscode.MarkdownString);
-		for (const command of ['syntaxstitch.togglePairFold', 'syntaxstitch.selectPairContents', 'syntaxstitch.selectPairWithDeclaration', 'syntaxstitch.selectPairLabel', 'syntaxstitch.goToPairStart', 'syntaxstitch.selectPairLabelLines']) { assert.ok(menu.value.includes(`command:${command}?`)); }
+		for (const command of ['syntaxstitch.togglePairFold', 'syntaxstitch.foldPairContents', 'syntaxstitch.selectPairContents', 'syntaxstitch.selectPairWithDeclaration', 'syntaxstitch.selectPairLabel', 'syntaxstitch.selectPairLabelLines']) { assert.ok(menu.value.includes(`command:${command}?`)); }
+		assert.ok(!menu.value.includes('[Before]') && !menu.value.includes('[After]') && !menu.value.includes('$(arrow-'));
+		assert.ok(menu.value.indexOf('[Fold / unfold]') < menu.value.indexOf('[Fold / unfold contents]'));
+		assert.ok(menu.value.includes('$(fold-down) [Fold / unfold contents]'));
+		assert.ok(menu.value.includes('↔ [Select inner content]'));
+		assert.ok(!menu.value.includes('$(selection) [Select inner content]'));
+		assert.ok(menu.value.includes('[Select declaration + block]'));
+		assert.ok(menu.value.includes('[Select delimiters + content]'));
+		assert.ok(menu.value.includes('$(symbol-array) [Select delimiters + content]'));
+		assert.ok(!menu.value.includes('[$(symbol-array)'));
+		assert.deepStrictEqual(parts.filter(part => part.command).map(part => part.value), ['function run()', 'L1', '↔', 'L3', '3 Lines']);
+		assert.deepStrictEqual(parts.filter(part => part.command).map(part => part.command!.command), ['syntaxstitch.selectPairWithDeclaration', 'syntaxstitch.selectPairStartLine', 'syntaxstitch.selectPairContents', 'syntaxstitch.selectPairEndLine', 'syntaxstitch.selectPairLabelLines']);
+		assert.strictEqual(parts.find(part => part.value === 'L1')!.command!.command, 'syntaxstitch.selectPairStartLine');
+		assert.strictEqual(parts.find(part => part.value === '↔')!.command!.command, 'syntaxstitch.selectPairContents');
+		assert.strictEqual(parts.find(part => part.value === 'L3')!.command!.command, 'syntaxstitch.selectPairEndLine');
+		assert.strictEqual(parts.find(part => part.value === '3 Lines')!.command!.command, 'syntaxstitch.selectPairLabelLines');
+		assert.ok(!parts.find(part => part.value === ' ')!.command && !parts.find(part => part.value === ' ')!.tooltip);
 		assert.ok(typeof menu.isTrusted === 'object' && menu.isTrusted.enabledCommands.length === 6);
-		const target = parts.find(part => part.command?.command === 'syntaxstitch.selectPairLabel')!.command!.arguments![0], run = (command: string) => vscode.commands.executeCommand<boolean>(command, target);
+		const target = parts.find(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration')!.command!.arguments![0], run = (command: string) => vscode.commands.executeCommand<boolean>(command, target);
 		editor.selection = new vscode.Selection(document.positionAt(content.indexOf('work')), document.positionAt(content.indexOf('work')));
 		const cursor = editor.selection;
 		assert.strictEqual(await run('syntaxstitch.togglePairFold'), true);
-		assert.deepStrictEqual(editor.selection, cursor);
+		assert.notDeepStrictEqual(editor.selection, cursor);
+		assert.ok(editor.selection.isEmpty);
+		assert.strictEqual(document.offsetAt(editor.selection.active), content.indexOf('{'));
 		assert.strictEqual(await run('syntaxstitch.togglePairFold'), true);
 		assert.strictEqual(await run('syntaxstitch.selectPairContents'), true);
 		assert.strictEqual(document.getText(editor.selection), '\n    work();\n');
@@ -343,8 +362,114 @@ suite('Extension integration', () => {
 		assert.ok(editor.selection.isEmpty);
 		assert.strictEqual(editor.selection.active.line, 0);
 		assert.strictEqual(editor.selection.active.character, content.indexOf('{'));
+		assert.strictEqual(await run('syntaxstitch.goAfterPairStart'), true);
+		assert.strictEqual(document.offsetAt(editor.selection.active), content.indexOf('{') + 1);
+		assert.strictEqual(await run('syntaxstitch.selectPairStartToken'), true);
+		assert.strictEqual(document.getText(editor.selection), '{');
+		assert.strictEqual(await run('syntaxstitch.selectPairStartLine'), true);
+		assert.strictEqual(document.getText(editor.selection), 'function run() {');
+		assert.strictEqual(await run('syntaxstitch.goToPairEnd'), true);
+		assert.ok(editor.selection.isEmpty);
+		assert.strictEqual(document.offsetAt(editor.selection.active), content.lastIndexOf('}'));
+		assert.strictEqual(await run('syntaxstitch.goAfterPairEnd'), true);
+		assert.strictEqual(document.offsetAt(editor.selection.active), content.length);
+		assert.strictEqual(await run('syntaxstitch.selectPairEndToken'), true);
+		assert.strictEqual(document.getText(editor.selection), '}');
+		assert.strictEqual(await run('syntaxstitch.selectPairEndLine'), true);
+		assert.strictEqual(document.getText(editor.selection), '}');
 		assert.strictEqual(await run('syntaxstitch.selectPairLabelLines'), true);
 		assert.strictEqual(document.getText(editor.selection), content);
+
+		editor.selection = new vscode.Selection(document.positionAt(content.length), document.positionAt(content.length));
+		assert.strictEqual(await run('syntaxstitch.togglePairFold'), true);
+		assert.strictEqual(document.offsetAt(editor.selection.active), content.indexOf('{'));
+		assert.strictEqual(await run('syntaxstitch.togglePairFold'), true);
+	});
+
+	test('folds and unfolds collapsible contents without folding the owner block', async () => {
+		const content = 'function run() {\n    if (ready) {\n        if (nested) {\n            work();\n        }\n        continueWork();\n    }\n    finish();\n}', document = await vscode.workspace.openTextDocument({ language: 'javascript', content });
+		const editor = await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), hint = hints.find(candidate => Array.isArray(candidate.label) && candidate.label.some(part => part.value.includes('function run()')));
+		assert.ok(hint && Array.isArray(hint.label));
+		const target = hint.label.find(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration')!.command!.arguments![0], caret = document.positionAt(content.indexOf('finish'));
+		editor.selection = new vscode.Selection(caret, caret);
+
+		assert.strictEqual(await vscode.commands.executeCommand<boolean>('syntaxstitch.foldPairContents', target), true);
+		await new Promise(resolve => setTimeout(resolve, 50));
+		assert.ok(editor.selection.isEmpty && editor.selection.active.isEqual(caret));
+		assert.ok(!editor.visibleRanges.some(range => range.contains(new vscode.Position(2, 0))));
+		assert.ok(editor.visibleRanges.some(range => range.contains(new vscode.Position(8, 0))));
+		assert.strictEqual(await vscode.commands.executeCommand<boolean>('syntaxstitch.foldPairContents', target), true);
+		await new Promise(resolve => setTimeout(resolve, 50));
+		assert.ok(editor.visibleRanges.some(range => range.contains(new vscode.Position(2, 0))));
+		assert.ok(!editor.visibleRanges.some(range => range.contains(new vscode.Position(3, 0))));
+		assert.ok(editor.visibleRanges.some(range => range.contains(new vscode.Position(8, 0))));
+	});
+
+	test('leaves an owner expanded when it has no collapsible contents', async () => {
+		const content = 'function run() {\n    work();\n}', document = await vscode.workspace.openTextDocument({ language: 'javascript', content });
+		const editor = await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), hint = hints.find(candidate => Array.isArray(candidate.label) && candidate.label.some(part => part.value.includes('function run()')));
+		assert.ok(hint && Array.isArray(hint.label));
+		const target = hint.label.find(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration')!.command!.arguments![0];
+
+		assert.strictEqual(await vscode.commands.executeCommand<boolean>('syntaxstitch.foldPairContents', target), true);
+		await new Promise(resolve => setTimeout(resolve, 50));
+		for (let line = 0; line < document.lineCount; line++) { assert.ok(editor.visibleRanges.some(range => range.contains(new vscode.Position(line, 0)))); }
+	});
+
+	test('navigates before and after complete tags and selects each full tag token', async () => {
+		const opening = '<section data-kind="demo">', closing = '</section>', content = `  ${opening}\n    <p>Content</p>\n  ${closing}`;
+		const document = await vscode.workspace.openTextDocument({ language: 'html', content });
+		const editor = await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), hint = hints.find(candidate => Array.isArray(candidate.label) && candidate.label.some(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration'));
+		assert.ok(hint && Array.isArray(hint.label));
+		const target = hint.label.find(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration')!.command!.arguments![0], run = (command: string) => vscode.commands.executeCommand<boolean>(command, target);
+		assert.strictEqual(await run('syntaxstitch.goToPairStart'), true);
+		assert.strictEqual(document.offsetAt(editor.selection.active), content.indexOf(opening));
+		assert.strictEqual(await run('syntaxstitch.goAfterPairStart'), true);
+		assert.strictEqual(document.offsetAt(editor.selection.active), content.indexOf(opening) + opening.length);
+		assert.strictEqual(await run('syntaxstitch.selectPairStartToken'), true);
+		assert.strictEqual(document.getText(editor.selection), opening);
+		assert.strictEqual(await run('syntaxstitch.selectPairStartLine'), true);
+		assert.strictEqual(document.getText(editor.selection), `  ${opening}`);
+		assert.strictEqual(await run('syntaxstitch.goToPairEnd'), true);
+		assert.strictEqual(document.offsetAt(editor.selection.active), content.indexOf(closing));
+		assert.strictEqual(await run('syntaxstitch.goAfterPairEnd'), true);
+		assert.strictEqual(document.offsetAt(editor.selection.active), content.indexOf(closing) + closing.length);
+		assert.strictEqual(await run('syntaxstitch.selectPairEndToken'), true);
+		assert.strictEqual(document.getText(editor.selection), closing);
+		assert.strictEqual(await run('syntaxstitch.selectPairEndLine'), true);
+		assert.strictEqual(document.getText(editor.selection), `  ${closing}`);
+	});
+
+	test('owner selects a preceding C# declaration with its own-line brace block', async () => {
+		const content = 'internal static int CalculateTotal(int[] values)\n    {\n        // SyntaxStitch C# target follows.\n        return values.Sum();\n    }';
+		const document = await vscode.workspace.openTextDocument({ language: 'csharp', content });
+		const editor = await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), hint = hints.find(candidate => Array.isArray(candidate.label) && candidate.label.some(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration'));
+		assert.ok(hint && Array.isArray(hint.label));
+		const target = hint.label.find(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration')!.command!.arguments![0];
+		assert.strictEqual(await vscode.commands.executeCommand<boolean>('syntaxstitch.selectPairWithDeclaration', target), true);
+		assert.strictEqual(document.getText(editor.selection), content);
+	});
+
+	test('keeps pair metadata visible when a declaration exceeds the inlay hint limit', async () => {
+		const declaration = 'function calculateAnExceptionallyLongQuarterlyRevenueProjection(customerAccounts) {', content = `${declaration}\n    return customerAccounts.length;\n}`;
+		const document = await vscode.workspace.openTextDocument({ language: 'javascript', content });
+		await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), hint = hints.find(candidate => Array.isArray(candidate.label) && candidate.label.some(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration'));
+		assert.ok(hint && Array.isArray(hint.label));
+		const label = hint.label.map(part => part.value).join(''), owner = hint.label.find(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration')!;
+		assert.ok(label.length <= 43);
+		assert.ok(label.endsWith(' L1↔L3 3 Lines'));
+		assert.ok(!label.includes('...') && !label.includes('…'));
+		assert.ok(owner.tooltip instanceof vscode.MarkdownString && owner.tooltip.value.includes('calculateAnExceptionallyLongQuarterlyRevenueProjection') && owner.tooltip.value.includes('customerAccounts'));
 	});
 
 	test('selects and expands a matching structure from its closing boundary', async () => {

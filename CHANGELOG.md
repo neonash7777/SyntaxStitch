@@ -10,10 +10,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
-- Add Venmo and Cash App links for supporting continued development.
-- Add inline pair actions after closing boundaries; modifier-click the owner to select the exact structural pair.
-- Show start line, end line, and total line count; modifier-click the start line to jump to the opening symbol or the line count to select every complete line in the block.
-- Add a larger inline Actions label with an ordinary-click hover menu to fold/unfold, select inner content, select a declaration/opening tag with its block, select an exact pair or complete lines, and jump to the opener.
+- Add compact `owner LX↔LY Z Lines` labels after multiline closing boundaries. Modifier-click the owner to select its declaration or opening tag with the complete block, either line number to select that source line, `↔` to select inner content, or the line count to select the complete block-line range.
+- Add an ordinary-click owner hover menu for folding and structural selection. **Fold / unfold contents** folds every collapsible child and non-recursively unfolds direct children without folding the owner block.
+- Compact long owner labels within VS Code's inlay-hint limit while retaining the full declaration in the hover.
+- Keep a safe opening-boundary caret when folding from inside or from the closing line so the block remains folded.
+- Add Venmo and Cash App support links.
 
 ## 0.0.2 - 2026-08-31
 

@@ -32,7 +32,7 @@ SyntaxStitch is enabled by default for JavaScript, TypeScript, JSON, HTML, XML, 
 - JSON Lines records in the **SyntaxStitch** output channel for agent/tool synchronization.
 - Persistent workspace repair statistics split into `[square]`, `(parenthesis)`, `{curly}`, `<tag>`, `"quote"`, and `t indentation` counters.
 - Accessible status-bar control showing state and total repairs; click it for toggle, statistics, reset, output, and reindex actions.
-- A larger inline `Actions · ← owner · L12–L28 · 17 lines` label after each closing boundary. Hover **Actions**, then use ordinary clicks to fold/unfold, select inner content, select the declaration/opening tag with its block, select the exact pair, jump to the opener, or select complete block lines.
+- An inline `owner L12↔L28 17 Lines` label after each closing boundary, where `owner` is the declaration or opening tag. Modifier-click the owner to select its defining statement and block, `↔` to select the content between delimiters, a line number to select that line, or the line count to select the complete line range. Hover the owner to fold/unfold the block, fold all collapsible content or non-recursively unfold its direct children, and access the structural selection actions.
 - Localized closing-brace indentation repair based on the matched opening brace.
 - Context-aware Structural Tab navigation through closing tags and across correctly indented line-leading `}` boundaries.
 
@@ -87,7 +87,10 @@ SyntaxStitch requires VS Code 1.127.0 or later.
 
 ## Support SyntaxStitch
 
-If SyntaxStitch saves you time, you can support its development through [Venmo @neonash7777](https://venmo.com/u/neonash7777) or [Cash App $neonash7777](https://cash.app/$neonash7777).
+If SyntaxStitch saves you time, you can support its development:
+
+[![Support with Venmo](https://img.shields.io/badge/Venmo-@neonash7777-008CFF?style=for-the-badge&logo=venmo&logoColor=white)](https://venmo.com/u/neonash7777)
+[![Support with Cash App](https://img.shields.io/badge/Cash_App-$neonash7777-00D64F?style=for-the-badge&logo=cashapp&logoColor=white)](https://cash.app/$neonash7777)
 
 ## Commands
 
@@ -97,7 +100,7 @@ If SyntaxStitch saves you time, you can support its development through [Venmo @
 - **SyntaxStitch: Toggle On/Off** changes the workspace setting, or the global setting when no workspace is open.
 - **SyntaxStitch: Show Repair Statistics** displays total and per-structure repair counts.
 - **SyntaxStitch: Reset Repair Count** clears the persisted count.
-- **SyntaxStitch: Configure Pair Labels** chooses `off`, `active`, or `all`; `all` omits inline pairs and labels multiline line-leading closers only. Labels use VS Code inlay hints and follow the editor's inlay-hint visibility setting. Their hover menu provides ordinary-click actions; inline metadata links remain modifier-click shortcuts because VS Code reserves plain inline clicks for caret placement.
+- **SyntaxStitch: Configure Pair Labels** chooses `off`, `active`, or `all`; `all` omits inline pairs and labels multiline line-leading closers only. Labels use VS Code inlay hints and follow the editor's inlay-hint visibility and maximum-length settings. Hover the owner for ordinary-click folding and selection actions. **Fold / unfold contents** folds every collapsible child, then unfolds only direct children when everything is folded. Direct inline controls require modifier-click because VS Code reserves a plain click for caret placement.
 - **SyntaxStitch: Rebuild Shadow Index** reindexes the active document.
 - **SyntaxStitch: Show Reconciliation Output** opens the structured repair log.
 
