@@ -322,9 +322,12 @@ suite('Extension integration', () => {
 		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), hint = hints.find(candidate => Array.isArray(candidate.label) && candidate.label.some(part => part.value.includes('function run()')));
 		assert.ok(hint && Array.isArray(hint.label));
 		const parts = hint.label;
-		assert.strictEqual(parts.map(part => part.value).join(''), '⊟ ◫ ▣ ← function run() · L1–L3 · 3 lines');
-		const action = (command: string) => parts.find(part => part.command?.command === command)!.command!;
-		const run = (command: string) => { const actionCommand = action(command); return vscode.commands.executeCommand<boolean>(actionCommand.command, ...actionCommand.arguments ?? []); };
+		assert.strictEqual(parts.map(part => part.value).join(''), 'Actions · ← function run() · L1–L3 · 3 lines');
+		const menu = parts[0].tooltip;
+		assert.ok(menu instanceof vscode.MarkdownString);
+		for (const command of ['syntaxstitch.togglePairFold', 'syntaxstitch.selectPairContents', 'syntaxstitch.selectPairWithDeclaration', 'syntaxstitch.selectPairLabel', 'syntaxstitch.goToPairStart', 'syntaxstitch.selectPairLabelLines']) { assert.ok(menu.value.includes(`command:${command}?`)); }
+		assert.ok(typeof menu.isTrusted === 'object' && menu.isTrusted.enabledCommands.length === 6);
+		const target = parts.find(part => part.command?.command === 'syntaxstitch.selectPairLabel')!.command!.arguments![0], run = (command: string) => vscode.commands.executeCommand<boolean>(command, target);
 		editor.selection = new vscode.Selection(document.positionAt(content.indexOf('work')), document.positionAt(content.indexOf('work')));
 		const cursor = editor.selection;
 		assert.strictEqual(await run('syntaxstitch.togglePairFold'), true);

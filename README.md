@@ -32,7 +32,7 @@ SyntaxStitch is enabled by default for JavaScript, TypeScript, JSON, HTML, XML, 
 - JSON Lines records in the **SyntaxStitch** output channel for agent/tool synchronization.
 - Persistent workspace repair statistics split into `[square]`, `(parenthesis)`, `{curly}`, `<tag>`, `"quote"`, and `t indentation` counters.
 - Accessible status-bar control showing state and total repairs; click it for toggle, statistics, reset, output, and reindex actions.
-- Inline pair actions such as `⊟ ◫ ▣ ← internal static int CalculateTotal(...) · L12–L28 · 17 lines` after closing boundaries without modifying source files. Modifier-click `⊟` to fold or unfold, `◫` to select only the content between boundaries, or `▣` to select the declaration/opening tag and its complete block. The owner selects the exact structural pair, the start line jumps to its opening symbol, and the line count selects every complete line in the block.
+- A larger inline `Actions · ← owner · L12–L28 · 17 lines` label after each closing boundary. Hover **Actions**, then use ordinary clicks to fold/unfold, select inner content, select the declaration/opening tag with its block, select the exact pair, jump to the opener, or select complete block lines.
 - Localized closing-brace indentation repair based on the matched opening brace.
 - Context-aware Structural Tab navigation through closing tags and across correctly indented line-leading `}` boundaries.
 
@@ -97,7 +97,7 @@ If SyntaxStitch saves you time, you can support its development through [Venmo @
 - **SyntaxStitch: Toggle On/Off** changes the workspace setting, or the global setting when no workspace is open.
 - **SyntaxStitch: Show Repair Statistics** displays total and per-structure repair counts.
 - **SyntaxStitch: Reset Repair Count** clears the persisted count.
-- **SyntaxStitch: Configure Pair Labels** chooses `off`, `active`, or `all`; `all` omits inline pairs and labels multiline line-leading closers only. Labels use VS Code inlay hints, follow the editor's inlay-hint visibility setting, and use its link-modifier gesture because VS Code reserves plain clicks for caret placement.
+- **SyntaxStitch: Configure Pair Labels** chooses `off`, `active`, or `all`; `all` omits inline pairs and labels multiline line-leading closers only. Labels use VS Code inlay hints and follow the editor's inlay-hint visibility setting. Their hover menu provides ordinary-click actions; inline metadata links remain modifier-click shortcuts because VS Code reserves plain inline clicks for caret placement.
 - **SyntaxStitch: Rebuild Shadow Index** reindexes the active document.
 - **SyntaxStitch: Show Reconciliation Output** opens the structured repair log.
 
