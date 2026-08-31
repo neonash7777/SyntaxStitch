@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## Unreleased
 
+## 0.0.3 - 2026-08-31
+
+### Added
+
+- Add Venmo and Cash App links for supporting continued development.
+
 ## 0.0.2 - 2026-08-31
 
 ### Fixed
