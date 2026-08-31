@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ShadowStructure, type BlockType, type RepairKind, type RepairPatch } from './shadowStructure';
+import { ShadowStructure, type BlockType, type RepairKind, type RepairPatch, type TokenPair } from './shadowStructure';
 
 // region State
 type DocumentState = { shadow: ShadowStructure; languageId: string };
@@ -140,14 +140,20 @@ const pairLabelHints = (document: vscode.TextDocument, range: vscode.Range): vsc
 		const position = labelPosition(document, pair);
 		if (!position || !range.contains(position)) { return []; }
 		const open = document.positionAt(pair.openIdx), close = document.positionAt(pair.closeIdx), startLine = open.line + 1, endLine = close.line + 1, lineCount = endLine - startLine + 1, target = pairLabelTarget(document, pair);
-		const owner = new vscode.InlayHintLabelPart(`← ${declarationAt(document, pair)} · `), start = new vscode.InlayHintLabelPart(`L${startLine}`), end = new vscode.InlayHintLabelPart(`–L${endLine} · `), count = new vscode.InlayHintLabelPart(`${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`);
+		const fold = new vscode.InlayHintLabelPart('⊟'), inner = new vscode.InlayHintLabelPart('◫'), whole = new vscode.InlayHintLabelPart('▣'), owner = new vscode.InlayHintLabelPart(` ← ${declarationAt(document, pair)} · `), start = new vscode.InlayHintLabelPart(`L${startLine}`), end = new vscode.InlayHintLabelPart(`–L${endLine} · `), count = new vscode.InlayHintLabelPart(`${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`);
+		fold.tooltip = 'Fold or unfold this block';
+		fold.command = { command: 'syntaxstitch.togglePairFold', title: 'Fold or unfold block', arguments: [target] };
+		inner.tooltip = 'Select only the content between this pair';
+		inner.command = { command: 'syntaxstitch.selectPairContents', title: 'Select inner content', arguments: [target] };
+		whole.tooltip = 'Select the declaration or opening tag with its complete block';
+		whole.command = { command: 'syntaxstitch.selectPairWithDeclaration', title: 'Select declaration and block', arguments: [target] };
 		owner.tooltip = 'Select the exact structural block';
 		owner.command = { command: 'syntaxstitch.selectPairLabel', title: 'Select structural block', arguments: [target] };
 		start.tooltip = `Go to the opening symbol on line ${startLine}`;
 		start.command = { command: 'syntaxstitch.goToPairStart', title: `Go to line ${startLine}`, arguments: [target] };
 		count.tooltip = 'Select every complete line in this block';
 		count.command = { command: 'syntaxstitch.selectPairLabelLines', title: 'Select complete block lines', arguments: [target] };
-		const hint = new vscode.InlayHint(position, [owner, start, end, count]);
+		const hint = new vscode.InlayHint(position, [fold, new vscode.InlayHintLabelPart(' '), inner, new vscode.InlayHintLabelPart(' '), whole, owner, start, end, count]);
 		hint.paddingLeft = true;
 		hint.tooltip = `SyntaxStitch pair spans lines ${startLine}–${endLine} (${lineCount} ${lineCount === 1 ? 'line' : 'lines'}). Use the editor's link modifier to activate an action.`;
 		return [hint];
@@ -246,6 +252,10 @@ export function activate(context: vscode.ExtensionContext): void {
 		index(editor.document);
 		return states.get(keyOf(editor.document))!.shadow.pairs.find(pair => pair.openIdx === target.openIdx && pair.closeIdx === target.closeIdx)
 			?? states.get(keyOf(editor.document))!.shadow.pairs.filter(pair => pair.openIdx <= target.openIdx && pair.closeIdx >= target.closeIdx).sort((left, right) => left.closeIdx - left.openIdx - (right.closeIdx - right.openIdx))[0];
+	};
+	const pairTokenEnd = (document: vscode.TextDocument, pair: TokenPair, side: 'open' | 'close'): number => {
+		const offset = side === 'open' ? pair.openIdx : pair.closeIdx;
+		return pair.type === 'tag' ? tagTokenEnd(document.getText(), offset) : offset + 1;
 	};
 	status.name = OUTPUT_NAME;
 	status.command = 'syntaxstitch.showMenu';
@@ -354,6 +364,30 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.commands.registerCommand('syntaxstitch.structuralTab', structuralTab),
 		vscode.commands.registerCommand('syntaxstitch.tabToNextClosingTag', structuralTab),
+		vscode.commands.registerCommand('syntaxstitch.togglePairFold', async (target: PairLabelTarget) => {
+			const editor = await pairLabelEditor(target), pair = pairAtTarget(editor, target);
+			if (!pair) { return false; }
+			const selections = editor.selections, position = editor.document.positionAt(pair.openIdx);
+			editor.selection = new vscode.Selection(position, position);
+			await vscode.commands.executeCommand('editor.toggleFold');
+			editor.selections = selections;
+			return true;
+		}),
+		vscode.commands.registerCommand('syntaxstitch.selectPairContents', async (target: PairLabelTarget) => {
+			const editor = await pairLabelEditor(target), pair = pairAtTarget(editor, target);
+			if (!pair) { return false; }
+			editor.selection = new vscode.Selection(editor.document.positionAt(pairTokenEnd(editor.document, pair, 'open')), editor.document.positionAt(pair.closeIdx));
+			editor.revealRange(editor.selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+			return true;
+		}),
+		vscode.commands.registerCommand('syntaxstitch.selectPairWithDeclaration', async (target: PairLabelTarget) => {
+			const editor = await pairLabelEditor(target), pair = pairAtTarget(editor, target);
+			if (!pair) { return false; }
+			const open = editor.document.positionAt(pair.openIdx), start = new vscode.Position(open.line, editor.document.lineAt(open.line).firstNonWhitespaceCharacterIndex), end = editor.document.positionAt(pairTokenEnd(editor.document, pair, 'close'));
+			editor.selection = new vscode.Selection(start, end);
+			editor.revealRange(editor.selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+			return true;
+		}),
 		vscode.commands.registerCommand('syntaxstitch.selectPairLabel', async (target: PairLabelTarget) => {
 			const editor = await pairLabelEditor(target), shadow = states.get(keyOf(editor.document))!.shadow, pair = pairAtTarget(editor, target), span = pair && shadow.selectionSpan(pair.closeIdx);
 			if (!span) { return false; }

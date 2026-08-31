@@ -315,20 +315,32 @@ suite('Extension integration', () => {
 		assert.strictEqual(document.offsetAt(editor.selection.active), close + 1);
 	});
 
-	test('pair label selects its exact block, links to its opener, and selects full lines', async () => {
+	test('pair label actions fold and select inner, structural, declaration, and full-line ranges', async () => {
 		const content = 'function run() {\n    work();\n}', document = await vscode.workspace.openTextDocument({ language: 'javascript', content });
 		const editor = await vscode.window.showTextDocument(document);
 		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
 		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), hint = hints.find(candidate => Array.isArray(candidate.label) && candidate.label.some(part => part.value.includes('function run()')));
 		assert.ok(hint && Array.isArray(hint.label));
-		assert.strictEqual(hint.label.map(part => part.value).join(''), '← function run() · L1–L3 · 3 lines');
-		assert.strictEqual(await vscode.commands.executeCommand<boolean>(hint.label[0].command!.command, ...hint.label[0].command!.arguments ?? []), true);
+		const parts = hint.label;
+		assert.strictEqual(parts.map(part => part.value).join(''), '⊟ ◫ ▣ ← function run() · L1–L3 · 3 lines');
+		const action = (command: string) => parts.find(part => part.command?.command === command)!.command!;
+		const run = (command: string) => { const actionCommand = action(command); return vscode.commands.executeCommand<boolean>(actionCommand.command, ...actionCommand.arguments ?? []); };
+		editor.selection = new vscode.Selection(document.positionAt(content.indexOf('work')), document.positionAt(content.indexOf('work')));
+		const cursor = editor.selection;
+		assert.strictEqual(await run('syntaxstitch.togglePairFold'), true);
+		assert.deepStrictEqual(editor.selection, cursor);
+		assert.strictEqual(await run('syntaxstitch.togglePairFold'), true);
+		assert.strictEqual(await run('syntaxstitch.selectPairContents'), true);
+		assert.strictEqual(document.getText(editor.selection), '\n    work();\n');
+		assert.strictEqual(await run('syntaxstitch.selectPairWithDeclaration'), true);
+		assert.strictEqual(document.getText(editor.selection), content);
+		assert.strictEqual(await run('syntaxstitch.selectPairLabel'), true);
 		assert.strictEqual(document.getText(editor.selection), content.slice(content.indexOf('{')));
-		assert.strictEqual(await vscode.commands.executeCommand<boolean>(hint.label[1].command!.command, ...hint.label[1].command!.arguments ?? []), true);
+		assert.strictEqual(await run('syntaxstitch.goToPairStart'), true);
 		assert.ok(editor.selection.isEmpty);
 		assert.strictEqual(editor.selection.active.line, 0);
 		assert.strictEqual(editor.selection.active.character, content.indexOf('{'));
-		assert.strictEqual(await vscode.commands.executeCommand<boolean>(hint.label[3].command!.command, ...hint.label[3].command!.arguments ?? []), true);
+		assert.strictEqual(await run('syntaxstitch.selectPairLabelLines'), true);
 		assert.strictEqual(document.getText(editor.selection), content);
 	});
 

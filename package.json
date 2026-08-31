@@ -148,7 +148,7 @@
             "Show ownership labels at multiline, line-leading closing braces and tags."
           ],
           "default": "all",
-          "description": "Render inline pair labels with line-span metadata and modifier-click actions for exact selection, opener navigation, and full-line selection."
+          "description": "Render inline pair labels with fold/unfold, inner-content, declaration-plus-block, exact-pair, opener-navigation, and full-line actions."
         },
         "syntaxstitch.fixClosingIndentation": {
           "type": "boolean",

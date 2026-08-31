@@ -32,7 +32,7 @@ SyntaxStitch is enabled by default for JavaScript, TypeScript, JSON, HTML, XML, 
 - JSON Lines records in the **SyntaxStitch** output channel for agent/tool synchronization.
 - Persistent workspace repair statistics split into `[square]`, `(parenthesis)`, `{curly}`, `<tag>`, `"quote"`, and `t indentation` counters.
 - Accessible status-bar control showing state and total repairs; click it for toggle, statistics, reset, output, and reindex actions.
-- Inline pair actions such as `← internal static int CalculateTotal(...) · L12–L28 · 17 lines` after closing boundaries without modifying source files. Modifier-click the owner to select the exact structural pair, the start line to jump to its opening symbol, or the line count to select every complete line in the block.
+- Inline pair actions such as `⊟ ◫ ▣ ← internal static int CalculateTotal(...) · L12–L28 · 17 lines` after closing boundaries without modifying source files. Modifier-click `⊟` to fold or unfold, `◫` to select only the content between boundaries, or `▣` to select the declaration/opening tag and its complete block. The owner selects the exact structural pair, the start line jumps to its opening symbol, and the line count selects every complete line in the block.
 - Localized closing-brace indentation repair based on the matched opening brace.
 - Context-aware Structural Tab navigation through closing tags and across correctly indented line-leading `}` boundaries.
 

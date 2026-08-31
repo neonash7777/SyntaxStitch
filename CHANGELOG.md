@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Add Venmo and Cash App links for supporting continued development.
 - Add inline pair actions after closing boundaries; modifier-click the owner to select the exact structural pair.
 - Show start line, end line, and total line count; modifier-click the start line to jump to the opening symbol or the line count to select every complete line in the block.
+- Add inline actions to fold or unfold a block, select only its inner content, or select its declaration/opening tag together with the complete block.
 
 ## 0.0.2 - 2026-08-31
 
