@@ -11,8 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Added
 
 - Add Venmo and Cash App links for supporting continued development.
-- Add normal-click CodeLens actions above closing boundaries to select their block from the beginning of its opening line.
-- Show start line, end line, and total line count in each CodeLens row; click the line range to jump to its first column or the line count to select the exact structural pair.
+- Add inline pair actions after closing boundaries; modifier-click the owner to select the exact structural pair.
+- Show start line, end line, and total line count; modifier-click the start line to jump to the opening symbol or the line count to select every complete line in the block.
 
 ## 0.0.2 - 2026-08-31
 

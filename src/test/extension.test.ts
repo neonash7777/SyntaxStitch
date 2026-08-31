@@ -315,20 +315,21 @@ suite('Extension integration', () => {
 		assert.strictEqual(document.offsetAt(editor.selection.active), close + 1);
 	});
 
-	test('pair label selects full lines, links to its start, and selects its exact block', async () => {
+	test('pair label selects its exact block, links to its opener, and selects full lines', async () => {
 		const content = 'function run() {\n    work();\n}', document = await vscode.workspace.openTextDocument({ language: 'javascript', content });
 		const editor = await vscode.window.showTextDocument(document);
 		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
-		const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', document.uri, 10), label = lenses.filter(lens => lens.command?.title.includes('function run()') || lens.command?.title === 'L1–L3' || lens.command?.title === '3 lines');
-		assert.deepStrictEqual(label.map(lens => lens.command?.title), ['← function run()', 'L1–L3', '3 lines']);
-		assert.strictEqual(await vscode.commands.executeCommand<boolean>(label[0].command!.command, ...label[0].command!.arguments ?? []), true);
-		assert.strictEqual(document.getText(editor.selection), content);
-		assert.strictEqual(await vscode.commands.executeCommand<boolean>(label[1].command!.command, ...label[1].command!.arguments ?? []), true);
+		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), hint = hints.find(candidate => Array.isArray(candidate.label) && candidate.label.some(part => part.value.includes('function run()')));
+		assert.ok(hint && Array.isArray(hint.label));
+		assert.strictEqual(hint.label.map(part => part.value).join(''), '← function run() · L1–L3 · 3 lines');
+		assert.strictEqual(await vscode.commands.executeCommand<boolean>(hint.label[0].command!.command, ...hint.label[0].command!.arguments ?? []), true);
+		assert.strictEqual(document.getText(editor.selection), content.slice(content.indexOf('{')));
+		assert.strictEqual(await vscode.commands.executeCommand<boolean>(hint.label[1].command!.command, ...hint.label[1].command!.arguments ?? []), true);
 		assert.ok(editor.selection.isEmpty);
 		assert.strictEqual(editor.selection.active.line, 0);
-		assert.strictEqual(editor.selection.active.character, 0);
-		assert.strictEqual(await vscode.commands.executeCommand<boolean>(label[2].command!.command, ...label[2].command!.arguments ?? []), true);
-		assert.strictEqual(document.getText(editor.selection), content.slice(content.indexOf('{')));
+		assert.strictEqual(editor.selection.active.character, content.indexOf('{'));
+		assert.strictEqual(await vscode.commands.executeCommand<boolean>(hint.label[3].command!.command, ...hint.label[3].command!.arguments ?? []), true);
+		assert.strictEqual(document.getText(editor.selection), content);
 	});
 
 	test('selects and expands a matching structure from its closing boundary', async () => {

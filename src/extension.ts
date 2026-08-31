@@ -118,13 +118,18 @@ const declarationAt = (document: vscode.TextDocument, pair: { openIdx: number; t
 	}
 	return 'block';
 };
+const labelPosition = (document: vscode.TextDocument, pair: { closeIdx: number; type: BlockType }): vscode.Position | undefined => {
+	if (pair.type === 'indent' || pair.type === 'quote') { return undefined; }
+	const text = document.getText(), tokenLength = pair.type === 'tag' ? Math.max(1, text.indexOf('>', pair.closeIdx) - pair.closeIdx + 1) : 1;
+	return document.positionAt(Math.min(pair.closeIdx + tokenLength, text.length));
+};
 const isMultilineBoundary = (document: vscode.TextDocument, pair: { openIdx: number; closeIdx: number }): boolean => {
 	const open = document.positionAt(pair.openIdx), close = document.positionAt(pair.closeIdx);
 	return open.line < close.line && document.lineAt(close.line).text.slice(0, close.character).trim() === '';
 };
 type PairLabelTarget = { uri: string; openIdx: number; closeIdx: number };
 const pairLabelTarget = (document: vscode.TextDocument, pair: { openIdx: number; closeIdx: number }): PairLabelTarget => ({ uri: document.uri.toString(), openIdx: pair.openIdx, closeIdx: pair.closeIdx });
-const pairLabelLenses = (document: vscode.TextDocument): vscode.CodeLens[] => {
+const pairLabelHints = (document: vscode.TextDocument, range: vscode.Range): vscode.InlayHint[] => {
 	if (!isEnabled(document)) { return []; }
 	const mode = vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri).get<PairLabelMode>('pairLabels', 'all');
 	if (mode === 'off') { return []; }
@@ -132,13 +137,20 @@ const pairLabelLenses = (document: vscode.TextDocument): vscode.CodeLens[] => {
 	const pairs = (states.get(keyOf(document))?.shadow.pairs ?? []).filter(pair => pair.type !== 'quote' && pair.type !== 'indent');
 	const visible = mode === 'all' ? pairs.filter(pair => isMultilineBoundary(document, pair)) : pairs.filter(pair => pair.openIdx <= cursor && cursor <= pair.closeIdx).sort((left, right) => left.closeIdx - left.openIdx - (right.closeIdx - right.openIdx)).slice(0, 1);
 	return visible.flatMap(pair => {
+		const position = labelPosition(document, pair);
+		if (!position || !range.contains(position)) { return []; }
 		const open = document.positionAt(pair.openIdx), close = document.positionAt(pair.closeIdx), startLine = open.line + 1, endLine = close.line + 1, lineCount = endLine - startLine + 1, target = pairLabelTarget(document, pair);
-		const range = new vscode.Range(close, close);
-		return [
-			new vscode.CodeLens(range, { command: 'syntaxstitch.selectPairLabelLines', title: `← ${declarationAt(document, pair)}`, tooltip: 'Select this block from the beginning of its opening line', arguments: [target] }),
-			new vscode.CodeLens(range, { command: 'syntaxstitch.goToPairStart', title: `L${startLine}–L${endLine}`, tooltip: `Go to opening line ${startLine}`, arguments: [target] }),
-			new vscode.CodeLens(range, { command: 'syntaxstitch.selectPairLabel', title: `${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`, tooltip: 'Select the exact structural block', arguments: [target] }),
-		];
+		const owner = new vscode.InlayHintLabelPart(`← ${declarationAt(document, pair)} · `), start = new vscode.InlayHintLabelPart(`L${startLine}`), end = new vscode.InlayHintLabelPart(`–L${endLine} · `), count = new vscode.InlayHintLabelPart(`${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`);
+		owner.tooltip = 'Select the exact structural block';
+		owner.command = { command: 'syntaxstitch.selectPairLabel', title: 'Select structural block', arguments: [target] };
+		start.tooltip = `Go to the opening symbol on line ${startLine}`;
+		start.command = { command: 'syntaxstitch.goToPairStart', title: `Go to line ${startLine}`, arguments: [target] };
+		count.tooltip = 'Select every complete line in this block';
+		count.command = { command: 'syntaxstitch.selectPairLabelLines', title: 'Select complete block lines', arguments: [target] };
+		const hint = new vscode.InlayHint(position, [owner, start, end, count]);
+		hint.paddingLeft = true;
+		hint.tooltip = `SyntaxStitch pair spans lines ${startLine}–${endLine} (${lineCount} ${lineCount === 1 ? 'line' : 'lines'}). Use the editor's link modifier to activate an action.`;
+		return [hint];
 	});
 };
 const tagTokenEnd = (text: string, start: number): number => {
@@ -266,7 +278,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		output,
 		status,
 		pairLabelsChanged,
-		vscode.languages.registerCodeLensProvider([{ scheme: 'file' }, { scheme: 'untitled' }, { scheme: 'vscode-notebook-cell' }], { onDidChangeCodeLenses: pairLabelsChanged.event, provideCodeLenses: pairLabelLenses }),
+		vscode.languages.registerInlayHintsProvider([{ scheme: 'file' }, { scheme: 'untitled' }, { scheme: 'vscode-notebook-cell' }], { onDidChangeInlayHints: pairLabelsChanged.event, provideInlayHints: pairLabelHints }),
 		vscode.workspace.onDidOpenTextDocument(document => { if (isEnabled(document)) { index(document); refreshLabels(); } }),
 		vscode.workspace.onDidCloseTextDocument(document => states.delete(keyOf(document))),
 		vscode.workspace.onDidChangeTextDocument(event => {
@@ -360,7 +372,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('syntaxstitch.goToPairStart', async (target: PairLabelTarget) => {
 			const editor = await pairLabelEditor(target), pair = pairAtTarget(editor, target);
 			if (!pair) { return false; }
-			const position = new vscode.Position(editor.document.positionAt(pair.openIdx).line, 0);
+			const position = editor.document.positionAt(pair.openIdx);
 			editor.selection = new vscode.Selection(position, position);
 			editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 			return true;
