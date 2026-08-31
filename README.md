@@ -32,7 +32,7 @@ SyntaxStitch is enabled by default for JavaScript, TypeScript, JSON, HTML, XML, 
 - JSON Lines records in the **SyntaxStitch** output channel for agent/tool synchronization.
 - Persistent workspace repair statistics split into `[square]`, `(parenthesis)`, `{curly}`, `<tag>`, `"quote"`, and `t indentation` counters.
 - Accessible status-bar control showing state and total repairs; click it for toggle, statistics, reset, output, and reindex actions.
-- Optional virtual pair labels such as `← internal static int CalculateTotal(...)` at closing boundaries without modifying source files.
+- Clickable pair labels such as `← internal static int CalculateTotal(...) · L12–L28 · 17 lines` at closing boundaries without modifying source files. Click the owner to select the complete block or its start line to jump to the opener.
 - Localized closing-brace indentation repair based on the matched opening brace.
 - Context-aware Structural Tab navigation through closing tags and across correctly indented line-leading `}` boundaries.
 
@@ -97,7 +97,7 @@ If SyntaxStitch saves you time, you can support its development through [Venmo @
 - **SyntaxStitch: Toggle On/Off** changes the workspace setting, or the global setting when no workspace is open.
 - **SyntaxStitch: Show Repair Statistics** displays total and per-structure repair counts.
 - **SyntaxStitch: Reset Repair Count** clears the persisted count.
-- **SyntaxStitch: Configure Pair Labels** chooses `off`, `active`, or `all`; `all` omits inline pairs and labels multiline line-leading closers only.
+- **SyntaxStitch: Configure Pair Labels** chooses `off`, `active`, or `all`; `all` omits inline pairs and labels multiline line-leading closers only. Labels use VS Code inlay hints and follow the editor's inlay-hint visibility setting.
 - **SyntaxStitch: Rebuild Shadow Index** reindexes the active document.
 - **SyntaxStitch: Show Reconciliation Output** opens the structured repair log.
 

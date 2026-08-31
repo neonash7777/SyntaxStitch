@@ -118,26 +118,38 @@ const declarationAt = (document: vscode.TextDocument, pair: { openIdx: number; t
 	}
 	return 'block';
 };
-const labelRange = (document: vscode.TextDocument, pair: { closeIdx: number; type: BlockType }): vscode.Range | undefined => {
+const labelPosition = (document: vscode.TextDocument, pair: { closeIdx: number; type: BlockType }): vscode.Position | undefined => {
 	if (pair.type === 'indent' || pair.type === 'quote') { return undefined; }
 	const text = document.getText(), tokenLength = pair.type === 'tag' ? Math.max(1, text.indexOf('>', pair.closeIdx) - pair.closeIdx + 1) : 1;
-	const end = document.positionAt(Math.min(pair.closeIdx + tokenLength, text.length));
-	return new vscode.Range(end, end);
+	return document.positionAt(Math.min(pair.closeIdx + tokenLength, text.length));
 };
 const isMultilineBoundary = (document: vscode.TextDocument, pair: { openIdx: number; closeIdx: number }): boolean => {
 	const open = document.positionAt(pair.openIdx), close = document.positionAt(pair.closeIdx);
 	return open.line < close.line && document.lineAt(close.line).text.slice(0, close.character).trim() === '';
 };
-const renderPairLabels = (editor: vscode.TextEditor, decoration: vscode.TextEditorDecorationType): void => {
-	const mode = vscode.workspace.getConfiguration(CONFIG_SECTION, editor.document.uri).get<PairLabelMode>('pairLabels', 'all'), pairs = (states.get(keyOf(editor.document))?.shadow.pairs ?? []).filter(pair => pair.type !== 'quote');
-	if (mode === 'off') { editor.setDecorations(decoration, []); return; }
-	const cursor = editor.document.offsetAt(editor.selection.active), visible = mode === 'all' ? pairs.filter(pair => isMultilineBoundary(editor.document, pair)) : pairs.filter(pair => pair.openIdx <= cursor && cursor <= pair.closeIdx).sort((left, right) => left.closeIdx - left.openIdx - (right.closeIdx - right.openIdx)).slice(0, 1);
-	const labels = visible.flatMap(pair => {
-		const range = labelRange(editor.document, pair);
-		const declaration = declarationAt(editor.document, pair);
-		return range ? [{ range, hoverMessage: `SyntaxStitch pair owner: \`${declaration}\``, renderOptions: { after: { contentText: `  ← ${declaration}` } } }] : [];
+type PairLabelTarget = { uri: string; pairId: string; version: number };
+const pairLabelTarget = (document: vscode.TextDocument, pairId: string): PairLabelTarget => ({ uri: document.uri.toString(), pairId, version: document.version });
+const pairLabelHints = (document: vscode.TextDocument, range: vscode.Range): vscode.InlayHint[] => {
+	if (!isEnabled(document)) { return []; }
+	const mode = vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri).get<PairLabelMode>('pairLabels', 'all');
+	if (mode === 'off') { return []; }
+	const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document === document), cursor = editor ? document.offsetAt(editor.selection.active) : -1;
+	const pairs = (states.get(keyOf(document))?.shadow.pairs ?? []).filter(pair => pair.type !== 'quote' && pair.type !== 'indent');
+	const visible = mode === 'all' ? pairs.filter(pair => isMultilineBoundary(document, pair)) : pairs.filter(pair => pair.openIdx <= cursor && cursor <= pair.closeIdx).sort((left, right) => left.closeIdx - left.openIdx - (right.closeIdx - right.openIdx)).slice(0, 1);
+	return visible.flatMap(pair => {
+		const position = labelPosition(document, pair);
+		if (!position || !range.contains(position)) { return []; }
+		const open = document.positionAt(pair.openIdx), close = document.positionAt(pair.closeIdx), startLine = open.line + 1, endLine = close.line + 1, lineCount = endLine - startLine + 1, target = pairLabelTarget(document, pair.id);
+		const owner = new vscode.InlayHintLabelPart(`← ${declarationAt(document, pair)} · `), start = new vscode.InlayHintLabelPart(`L${startLine}`), details = new vscode.InlayHintLabelPart(`–L${endLine} · ${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`);
+		owner.tooltip = 'Select this structural block';
+		owner.command = { command: 'syntaxstitch.selectPairLabel', title: 'Select structural block', arguments: [target] };
+		start.tooltip = `Go to opening line ${startLine}`;
+		start.command = { command: 'syntaxstitch.goToPairStart', title: `Go to line ${startLine}`, arguments: [target] };
+		const hint = new vscode.InlayHint(position, [owner, start, details]);
+		hint.paddingLeft = true;
+		hint.tooltip = `SyntaxStitch pair spans lines ${startLine}–${endLine} (${lineCount} ${lineCount === 1 ? 'line' : 'lines'}).`;
+		return [hint];
 	});
-	editor.setDecorations(decoration, labels);
 };
 const tagTokenEnd = (text: string, start: number): number => {
 	let quote = '';
@@ -224,9 +236,9 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 export function activate(context: vscode.ExtensionContext): void {
 	const output = vscode.window.createOutputChannel(OUTPUT_NAME, { log: true });
 	const status = vscode.window.createStatusBarItem('syntaxstitch.status', vscode.StatusBarAlignment.Right, 100);
-	const pairLabels = vscode.window.createTextEditorDecorationType({ after: { color: new vscode.ThemeColor('descriptionForeground'), fontStyle: 'italic' }, rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed });
+	const pairLabelsChanged = new vscode.EventEmitter<void>();
 	const counter = new RepairCounter(context);
-	const refreshLabels = (): void => vscode.window.visibleTextEditors.forEach(editor => renderPairLabels(editor, pairLabels));
+	const refreshLabels = (): void => pairLabelsChanged.fire();
 	status.name = OUTPUT_NAME;
 	status.command = 'syntaxstitch.showMenu';
 	refreshStatus(status, counter);
@@ -257,7 +269,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		output,
 		status,
-		pairLabels,
+		pairLabelsChanged,
+		vscode.languages.registerInlayHintsProvider([{ scheme: 'file' }, { scheme: 'untitled' }, { scheme: 'vscode-notebook-cell' }], { onDidChangeInlayHints: pairLabelsChanged.event, provideInlayHints: pairLabelHints }),
 		vscode.workspace.onDidOpenTextDocument(document => { if (isEnabled(document)) { index(document); refreshLabels(); } }),
 		vscode.workspace.onDidCloseTextDocument(document => states.delete(keyOf(document))),
 		vscode.workspace.onDidChangeTextDocument(event => {
@@ -271,7 +284,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.window.onDidChangeActiveTextEditor(() => { refreshStatus(status, counter); refreshLabels(); }),
 		vscode.window.onDidChangeVisibleTextEditors(refreshLabels),
-		vscode.window.onDidChangeTextEditorSelection(event => { placePendingTagCaret(event.textEditor); renderPairLabels(event.textEditor, pairLabels); }),
+		vscode.window.onDidChangeTextEditorSelection(event => { placePendingTagCaret(event.textEditor); refreshLabels(); }),
 		vscode.workspace.onDidChangeConfiguration(event => {
 			if (!event.affectsConfiguration(CONFIG_SECTION)) { return; }
 			states.clear();
@@ -333,6 +346,27 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.commands.registerCommand('syntaxstitch.structuralTab', structuralTab),
 		vscode.commands.registerCommand('syntaxstitch.tabToNextClosingTag', structuralTab),
+		vscode.commands.registerCommand('syntaxstitch.selectPairLabel', (target: PairLabelTarget) => {
+			const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document.uri.toString() === target.uri);
+			if (!editor || editor.document.version !== target.version) { return false; }
+			index(editor.document);
+			const shadow = states.get(keyOf(editor.document))!.shadow, pair = shadow.pairs.find(candidate => candidate.id === target.pairId), span = pair && shadow.selectionSpan(pair.closeIdx);
+			if (!span) { return false; }
+			editor.selection = new vscode.Selection(editor.document.positionAt(span.start), editor.document.positionAt(span.end));
+			editor.revealRange(editor.selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+			return true;
+		}),
+		vscode.commands.registerCommand('syntaxstitch.goToPairStart', (target: PairLabelTarget) => {
+			const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document.uri.toString() === target.uri);
+			if (!editor || editor.document.version !== target.version) { return false; }
+			index(editor.document);
+			const pair = states.get(keyOf(editor.document))!.shadow.pairs.find(candidate => candidate.id === target.pairId);
+			if (!pair) { return false; }
+			const position = editor.document.positionAt(pair.openIdx);
+			editor.selection = new vscode.Selection(position, position);
+			editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+			return true;
+		}),
 		vscode.commands.registerCommand('syntaxstitch.selectMatchingStructure', () => {
 			const editor = vscode.window.activeTextEditor;
 			if (!editor || !isEnabled(editor.document)) { return 0; }
