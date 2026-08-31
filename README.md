@@ -83,7 +83,7 @@ SyntaxStitch yields Tab to VS Code while a snippet, suggestion, inline suggestio
 
 Install **SyntaxStitch** from the VS Code Marketplace, or download the `.vsix` attached to a [GitHub Release](https://github.com/neonash7777/SyntaxStitch/releases) and run **Extensions: Install from VSIX...**.
 
-SyntaxStitch requires VS Code 1.134.0 or later.
+SyntaxStitch requires VS Code 1.127.0 or later.
 
 ## Commands
 

@@ -11,13 +11,12 @@ const OUTPUT_NAME = 'SyntaxStitch';
 const CONFIG_SECTION = 'syntaxstitch';
 const STATISTICS_KEY = 'syntaxstitch.repairStatistics';
 const BYTES_PER_KIBIBYTE = 1024;
-const EDITOR_COMMAND_SETTLE_MS = 20;
 type LogLevel = 'off' | 'repairs' | 'verbose';
 type PairLabelMode = 'off' | 'active' | 'all';
 type SelectionSnapshot = { anchor: number; active: number }[];
 type SelectionTransition = { version: number; from: SelectionSnapshot; to: SelectionSnapshot };
 const selectionHistory = new WeakMap<vscode.TextEditor, SelectionTransition[]>();
-type DirectDeletion = { editor: vscode.TextEditor; direction: 'left' | 'right'; offset: number };
+type DirectDeletion = { editor: vscode.TextEditor; direction: 'left' | 'right'; offset: number; completed: Promise<void>; complete: () => void; selection?: vscode.Selection };
 const directDeletions = new Map<string, DirectDeletion>();
 const pendingTagCarets = new WeakMap<vscode.TextEditor, { afterOpen: number; afterClose: number; version: number; expiresAt: number }>();
 
@@ -172,7 +171,7 @@ const captureTagCaret = (event: vscode.TextDocumentChangeEvent): void => {
 // endregion
 
 // region Reconciliation
-type ProtectedCloserIntent = { editor: vscode.TextEditor; pairId: string; blockType: BlockType; stepInside: boolean };
+type ProtectedCloserIntent = { deletion: DirectDeletion; pairId: string; blockType: BlockType; stepInside: boolean };
 const protectedCloserIntent = (event: vscode.TextDocumentChangeEvent, patches: readonly RepairPatch[]): ProtectedCloserIntent | undefined => {
 	const change = event.contentChanges[0], deletion = directDeletions.get(keyOf(event.document)), editor = deletion?.editor;
 	if (!editor || !deletion || editor.document !== event.document || event.contentChanges.length !== 1 || !change || change.text || change.rangeLength !== 1) { return undefined; }
@@ -180,7 +179,7 @@ const protectedCloserIntent = (event: vscode.TextDocumentChangeEvent, patches: r
 	if (deletion.offset !== expectedOffset) { return undefined; }
 	const patch = patches.find(candidate => (candidate.blockType === 'brace' || candidate.blockType === 'tag') && candidate.side === 'close');
 	if (patch) { directDeletions.delete(keyOf(event.document)); }
-	return patch ? { editor, pairId: patch.pairId, blockType: patch.blockType, stepInside: patch.blockType === 'brace' && ')]}'.includes(event.document.getText()[change.rangeOffset - 1] ?? '') } : undefined;
+	return patch ? { deletion, pairId: patch.pairId, blockType: patch.blockType, stepInside: patch.blockType === 'brace' && ')]}'.includes(event.document.getText()[change.rangeOffset - 1] ?? '') } : undefined;
 };
 const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.OutputChannel, counter: RepairCounter, status: vscode.StatusBarItem): Promise<void> => {
 	const document = event.document, key = keyOf(document);
@@ -215,7 +214,7 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 		if (restored && closerIntent) {
 			const span = shadow?.selectionSpan(restored.closeIdx), cursor = document.positionAt(restored.closeIdx);
 			const selection = closerIntent.stepInside ? new vscode.Selection(cursor, cursor) : span ? new vscode.Selection(document.positionAt(span.start), document.positionAt(span.end)) : undefined;
-			if (selection) { setTimeout(() => { closerIntent.editor.selection = selection; }, EDITOR_COMMAND_SETTLE_MS); }
+			if (selection) { closerIntent.deletion.selection = selection; }
 		}
 	}
 };
@@ -265,6 +264,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const key = keyOf(event.document), deletion = directDeletions.get(key);
 			void reconcile(event, output, counter, status).finally(() => {
 				if (deletion && directDeletions.get(key) === deletion) { directDeletions.delete(key); }
+				deletion?.complete();
 				captureTagCaret(event);
 				refreshLabels();
 			});
@@ -304,9 +304,12 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!editor || !isEnabled(editor.document) || editor.selections.length !== 1 || !editor.selection.isEmpty) { return vscode.commands.executeCommand(command); }
 			const offset = editor.document.offsetAt(editor.selection.active);
 			if ((direction === 'left' && offset === 0) || (direction === 'right' && offset === editor.document.getText().length)) { return vscode.commands.executeCommand(command); }
-			const deletion = { editor, direction, offset } satisfies DirectDeletion;
+			let complete!: () => void;
+			const completed = new Promise<void>(resolve => { complete = resolve; }), deletion: DirectDeletion = { editor, direction, offset, completed, complete };
 			directDeletions.set(keyOf(editor.document), deletion);
-			return vscode.commands.executeCommand(command);
+			await vscode.commands.executeCommand(command);
+			await completed;
+			if (deletion.selection) { editor.selection = deletion.selection; }
 		})),
 		vscode.commands.registerCommand('syntaxstitch.showStatistics', () => {
 			const { total, byKind, unclassified, lastAt } = counter.statistics, last = lastAt ? new Date(lastAt).toLocaleString() : 'Never';
