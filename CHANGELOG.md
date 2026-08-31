@@ -6,14 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## Unreleased
 
+## 0.0.4 - 2026-08-31
+
+### Changed
+
+- Improve documentation grammar and clarify edit intent, pair-label actions, language ownership, structural selection, and release instructions.
+
 ## 0.0.3 - 2026-08-31
 
 ### Added
 
 - Add compact `owner LX↔LY Z Lines` labels after multiline closing boundaries. Modifier-click the owner to select its declaration or opening tag with the complete block, either line number to select that source line, `↔` to select inner content, or the line count to select the complete block-line range.
-- Add an ordinary-click owner hover menu for folding and structural selection. **Fold / unfold contents** folds every collapsible child and non-recursively unfolds direct children without folding the owner block.
+- Add an ordinary-click owner hover menu for folding and structural selection. **Fold / unfold contents** folds every collapsible child; when all children are folded, it unfolds only direct children and leaves the owner block expanded.
 - Compact long owner labels within VS Code's inlay-hint limit while retaining the full declaration in the hover.
-- Keep a safe opening-boundary caret when folding from inside or from the closing line so the block remains folded.
+- Move the caret to the opening boundary when folding from inside the block or its closing line, preventing the block from immediately unfolding.
 - Add Venmo and Cash App support links.
 
 ## 0.0.2 - 2026-08-31

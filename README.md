@@ -6,9 +6,9 @@
 
 SyntaxStitch watches structural edits and repairs orphaned brackets, quotes, tags, and Python indentation before one missing boundary turns the rest of the file into syntax-error confetti. It works with AI edits, paste replacements, multi-cursor changes, and ordinary typing.
 
-Behind the scenes, SyntaxStitch maintains a UUID-backed shadow index of paired boundaries. If an edit destroys exactly one side, it checks whether the surviving side has legitimately rebound to another boundary. Only genuinely orphaned structures are healed.
+Behind the scenes, SyntaxStitch maintains a UUID-backed shadow index of paired boundaries. If an edit destroys one side, SyntaxStitch checks whether the surviving side now matches another boundary. It repairs only genuinely orphaned structures.
 
-No cloud service. No source upload. No configuration required.
+No cloud service. No source upload. No setup required.
 
 ## Supported Structures
 
@@ -32,13 +32,13 @@ SyntaxStitch is enabled by default for JavaScript, TypeScript, JSON, HTML, XML, 
 - JSON Lines records in the **SyntaxStitch** output channel for agent/tool synchronization.
 - Persistent workspace repair statistics split into `[square]`, `(parenthesis)`, `{curly}`, `<tag>`, `"quote"`, and `t indentation` counters.
 - Accessible status-bar control showing state and total repairs; click it for toggle, statistics, reset, output, and reindex actions.
-- An inline `owner L12↔L28 17 Lines` label after each closing boundary, where `owner` is the declaration or opening tag. Modifier-click the owner to select its defining statement and block, `↔` to select the content between delimiters, a line number to select that line, or the line count to select the complete line range. Hover the owner to fold/unfold the block, fold all collapsible content or non-recursively unfold its direct children, and access the structural selection actions.
+- An inline `owner L12↔L28 17 Lines` label after each closing boundary, where `owner` is the declaration or opening tag. Modifier-click the owner to select its defining statement and block, `↔` to select the content between delimiters, either line number to select that line, or the line count to select the complete range. Hover the owner for folding and structural selection actions. **Fold / unfold contents** folds every collapsible child; when all children are folded, it unfolds only the direct children.
 - Localized closing-brace indentation repair based on the matched opening brace.
 - Context-aware Structural Tab navigation through closing tags and across correctly indented line-leading `}` boundaries.
 
 ## Why SyntaxStitch?
 
-A single missing `)`, `]`, `}`, closing tag, or dedent can collapse syntax highlighting and make the next AI edit reason from broken code. SyntaxStitch keeps the buffer structurally coherent while preserving deliberate edits, including deleting redundant boundaries.
+A single missing `)`, `]`, `}`, closing tag, or dedent can break syntax highlighting and force the next AI edit to work from malformed code. SyntaxStitch keeps the buffer structurally coherent while preserving deliberate changes, including edits that remove redundant boundaries.
 
 It is a guardrail, not a formatter or compiler replacement. Your existing language server remains the authority for language semantics.
 
@@ -48,32 +48,32 @@ SyntaxStitch distinguishes an accidental one-sided edit from a deliberate struct
 
 | Edit | Response | Why |
 | --- | --- | --- |
-| Delete one side of a whitespace-only `()`, `[]`, `{}`, quote, or paired tag | Remove the surviving boundary and interior whitespace. | Empty concrete pairs behave as one atomic unit; restoring them would fight ordinary cleanup. |
+| Delete one side of a whitespace-only `()`, `[]`, `{}`, quote, or paired tag | Remove the surviving boundary and interior whitespace. | An empty pair behaves as one unit, so restoring half of it would interfere with ordinary cleanup. |
 | Delete one side of a pair containing code, comments, or text | Restore the missing boundary. | Meaningful content still needs its structural owner. Comments count as meaningful content. |
-| Backspace/Delete a meaningful closing boundary directly | Restore it and select the complete pair, such as `{ ... }`, `(x, y)`, or `<p>...</p>`. | Selection makes the protected ownership visible and gives the next edit an explicit whole-structure target. |
+| Backspace/Delete a meaningful closing boundary directly | Restore it and select the complete pair, such as `{ ... }`, `(x, y)`, or `<p>...</p>`. | Selecting the restored structure makes the repair visible and gives the next edit an explicit target. |
 | Delete part of a multi-character boundary such as the `>` in `</p>` | Replace the surviving `</p` fragment with exactly one complete `</p>`. | Replacing the damaged token in place avoids duplicating a full tag behind its surviving fragment. |
-| An HTML provider inserts adjacent `<p></p>` and leaves the cursor after `</p>` | Move the cursor between `<p>` and `</p>`. | The provider owns tag generation; SyntaxStitch only corrects the short-lived caret position so typing can continue inside the element. |
+| An HTML provider inserts adjacent `<p></p>` and leaves the cursor after `</p>` | Move the cursor between `<p>` and `</p>`. | The provider generates the tags; SyntaxStitch only corrects the temporary caret position so typing can continue inside the element. |
 | Press Tab immediately before an indexed closing tag | Jump to the next closing tag, such as from `</h1>` to `</p>`. | Closing tags form a useful outward path through nested markup. |
 | Press Tab immediately before a correctly indented line-leading `}` | Jump just past the `}`. | The block is already aligned, so adding more indentation is less useful than crossing its structural boundary. A misindented `}` keeps normal Tab behavior. |
 | Backspace/Delete the outer boundary in adjacent closers such as `add(x))` | Restore it and move the caret one boundary inward. | Stepping inward avoids trapping the caret outside a nested closer chain. Reaching a meaningful inner pair selects that pair. |
-| Repeatedly delete nested empty pairs | Remove one layer per attempt and leave the caret at the next boundary. | One layer preserves predictable keyboard intent without collapsing unrelated nesting. |
+| Repeatedly delete nested empty pairs | Remove one layer per attempt and leave the caret at the next boundary. | Removing one layer at a time keeps the behavior predictable without collapsing unrelated nesting. |
 | Select and remove both boundaries together | Allow the edit. | A complete-pair edit is explicit intent to remove or unwrap that structure. |
-| Paste, AI, or multi-cursor edit both boundaries together | Allow the coordinated edit. | Batch edits that supply or remove both sides should not be undone token by token. |
+| Paste, AI, or multi-cursor edit both boundaries together | Allow the coordinated edit. | Changing both boundaries in one operation signals deliberate intent, so SyntaxStitch preserves the edit as a whole. |
 | Replace a boundary with an equivalent token or tag | Keep the replacement without adding another boundary. | The resulting structure is already balanced. |
-| Remove a closer when a genuinely spare later closer can take ownership | Allow rebinding only when the scoped pair count is preserved. | This repairs ownership in malformed code without stealing a closer from an enclosing pair. |
-| Programmatically delete a protected multiline closer | Restore it while compacting one trailing line break per attempt. | Non-interactive edits have no caret intent; gradual compaction preserves structure while honoring movement toward the content. |
+| Remove a closer when an unused later closer can complete the pair | Reassign the later closer only when the number of pairs in scope stays the same. | This repairs malformed code without taking a closer from an enclosing pair. |
+| Programmatically delete a protected multiline closer | Restore it while removing one trailing line break per attempt. | Programmatic edits provide no caret intent; gradual compaction preserves the structure while moving the closer toward its content. |
 
-Direct selection and caret movement apply only to empty, single-cursor Backspace/Delete operations. Selections, multi-cursor edits, paste, and AI/workspace edits keep their batch semantics.
+Direct selection and caret movement apply only to Backspace/Delete operations with one caret and no selection. Selections, multi-cursor edits, paste operations, and AI or workspace edits are handled as complete changes.
 
-SyntaxStitch does not independently auto-close a newly typed HTML tag. VS Code's HTML service, Emmet, or another language provider may create the closing tag. SyntaxStitch recognizes a newly inserted adjacent empty pair and corrects a cursor left after its closer; the pending correction is document-version-bound and expires after 500 ms.
+SyntaxStitch does not auto-close newly typed HTML tags. VS Code's HTML service, Emmet, or another language provider may create the closing tag. When a provider inserts an adjacent empty pair and leaves the cursor after the closing tag, SyntaxStitch moves the cursor inside. The pending correction applies only to the current document version and expires after 500 ms.
 
 ### Language Ownership
 
-Every shadow pair records its active language. HTML tags remain in HTML, `<script>` bodies shift to JavaScript, `<style>` bodies shift to CSS, and JavaScript template markup or JSX/TSX shifts back to HTML. Quotes and comments suppress structural decoys in their own context. Language ownership is also checked during post-edit rebinding, so a JavaScript closer cannot silently adopt an HTML or CSS boundary.
+Every shadow pair records its active language. HTML tags use HTML rules, `<script>` bodies use JavaScript, `<style>` bodies use CSS, and markup in JavaScript templates or JSX/TSX switches back to HTML rules. Quotes and comments prevent brace-like text from being treated as structure. SyntaxStitch also checks language ownership when matching boundaries after an edit, so a JavaScript closer cannot adopt an HTML or CSS boundary.
 
 ### Structural Selection
 
-**Select Matching Structure** selects the pair at either boundary and expands through enclosing pairs. On macOS, `Cmd+PageUp` expands and `Cmd+PageDown` retraces the exact prior selections. Without history, Page Down contracts toward the selection's active edge. This history is intentional: in sibling-heavy blocks, geometric inference alone cannot know which child the user came from.
+**Select Matching Structure** selects the pair at either boundary and expands through enclosing pairs. On macOS, `Cmd+PageUp` expands and `Cmd+PageDown` retraces previous selections exactly. Without selection history, `Cmd+PageDown` contracts toward the active edge. The history resolves ambiguity in blocks with multiple siblings, where position alone cannot identify the previously selected child.
 
 When a single empty cursor is immediately before a closing tag, Tab moves to the next closing tag in document order. Before a line-leading `}`, it jumps past the boundary only when the closing line's indentation exactly matches the indexed opening line. Otherwise, Tab retains its normal indentation behavior.
 
@@ -95,7 +95,7 @@ If SyntaxStitch saves you time, you can support its development:
 ## Commands
 
 - **SyntaxStitch: Select Matching Structure** selects the complete pair at the cursor, including both boundaries and its content. Run it again to expand outward. The default shortcuts are `Ctrl+Alt+Shift+S` and, on macOS, `Cmd+PageUp`. They can be changed in **Preferences: Open Keyboard Shortcuts**.
-- **SyntaxStitch: Select Inner Structure** retraces selections made with **Select Matching Structure**, restoring the exact previous section. Otherwise, it contracts to the nearest nested pair and follows the selection's active edge when siblings exist. On macOS, use `Cmd+PageDown`.
+- **SyntaxStitch: Select Inner Structure** retraces selections made with **Select Matching Structure**, restoring the exact previous selection. Without selection history, it contracts to the nearest nested pair and follows the active edge when siblings exist. On macOS, use `Cmd+PageDown`.
 - **SyntaxStitch: Structural Tab** moves from one closing tag to the next or crosses a correctly indented line-leading `}`. Tab invokes it only when editor contexts such as snippets and suggestions do not own Tab.
 - **SyntaxStitch: Toggle On/Off** changes the workspace setting, or the global setting when no workspace is open.
 - **SyntaxStitch: Show Repair Statistics** displays total and per-structure repair counts.
