@@ -85,6 +85,10 @@ Install **SyntaxStitch** from the VS Code Marketplace, or download the `.vsix` a
 
 SyntaxStitch requires VS Code 1.127.0 or later.
 
+## Support SyntaxStitch
+
+If SyntaxStitch saves you time, you can support its development through [Venmo @neonash7777](https://venmo.com/u/neonash7777) or [Cash App $neonash7777](https://cash.app/$neonash7777).
+
 ## Commands
 
 - **SyntaxStitch: Select Matching Structure** selects the complete pair at the cursor, including both boundaries and its content. Run it again to expand outward. The default shortcuts are `Ctrl+Alt+Shift+S` and, on macOS, `Cmd+PageUp`. They can be changed in **Preferences: Open Keyboard Shortcuts**.
