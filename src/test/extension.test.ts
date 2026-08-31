@@ -315,7 +315,7 @@ suite('Extension integration', () => {
 		assert.strictEqual(document.offsetAt(editor.selection.active), close + 1);
 	});
 
-	test('pair label selects its block and links to its opening line', async () => {
+	test('pair label selects full lines, links to its start, and selects its exact block', async () => {
 		const content = 'function run() {\n    work();\n}', document = await vscode.workspace.openTextDocument({ language: 'javascript', content });
 		const editor = await vscode.window.showTextDocument(document);
 		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
@@ -324,11 +324,13 @@ suite('Extension integration', () => {
 		assert.ok(hint && Array.isArray(hint.label));
 		assert.strictEqual(hint.label.map(part => part.value).join(''), '← function run() · L1–L3 · 3 lines');
 		assert.strictEqual(await vscode.commands.executeCommand<boolean>(hint.label[0].command!.command, ...hint.label[0].command!.arguments ?? []), true);
-		assert.strictEqual(document.getText(editor.selection), content.slice(content.indexOf('{')));
+		assert.strictEqual(document.getText(editor.selection), content);
 		assert.strictEqual(await vscode.commands.executeCommand<boolean>(hint.label[1].command!.command, ...hint.label[1].command!.arguments ?? []), true);
 		assert.ok(editor.selection.isEmpty);
 		assert.strictEqual(editor.selection.active.line, 0);
-		assert.strictEqual(editor.selection.active.character, content.indexOf('{'));
+		assert.strictEqual(editor.selection.active.character, 0);
+		assert.strictEqual(await vscode.commands.executeCommand<boolean>(hint.label[3].command!.command, ...hint.label[3].command!.arguments ?? []), true);
+		assert.strictEqual(document.getText(editor.selection), content.slice(content.indexOf('{')));
 	});
 
 	test('selects and expands a matching structure from its closing boundary', async () => {

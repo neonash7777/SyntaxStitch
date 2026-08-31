@@ -127,8 +127,8 @@ const isMultilineBoundary = (document: vscode.TextDocument, pair: { openIdx: num
 	const open = document.positionAt(pair.openIdx), close = document.positionAt(pair.closeIdx);
 	return open.line < close.line && document.lineAt(close.line).text.slice(0, close.character).trim() === '';
 };
-type PairLabelTarget = { uri: string; pairId: string; version: number };
-const pairLabelTarget = (document: vscode.TextDocument, pairId: string): PairLabelTarget => ({ uri: document.uri.toString(), pairId, version: document.version });
+type PairLabelTarget = { uri: string; openIdx: number; closeIdx: number };
+const pairLabelTarget = (document: vscode.TextDocument, pair: { openIdx: number; closeIdx: number }): PairLabelTarget => ({ uri: document.uri.toString(), openIdx: pair.openIdx, closeIdx: pair.closeIdx });
 const pairLabelHints = (document: vscode.TextDocument, range: vscode.Range): vscode.InlayHint[] => {
 	if (!isEnabled(document)) { return []; }
 	const mode = vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri).get<PairLabelMode>('pairLabels', 'all');
@@ -139,13 +139,15 @@ const pairLabelHints = (document: vscode.TextDocument, range: vscode.Range): vsc
 	return visible.flatMap(pair => {
 		const position = labelPosition(document, pair);
 		if (!position || !range.contains(position)) { return []; }
-		const open = document.positionAt(pair.openIdx), close = document.positionAt(pair.closeIdx), startLine = open.line + 1, endLine = close.line + 1, lineCount = endLine - startLine + 1, target = pairLabelTarget(document, pair.id);
-		const owner = new vscode.InlayHintLabelPart(`← ${declarationAt(document, pair)} · `), start = new vscode.InlayHintLabelPart(`L${startLine}`), details = new vscode.InlayHintLabelPart(`–L${endLine} · ${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`);
-		owner.tooltip = 'Select this structural block';
-		owner.command = { command: 'syntaxstitch.selectPairLabel', title: 'Select structural block', arguments: [target] };
+		const open = document.positionAt(pair.openIdx), close = document.positionAt(pair.closeIdx), startLine = open.line + 1, endLine = close.line + 1, lineCount = endLine - startLine + 1, target = pairLabelTarget(document, pair);
+		const owner = new vscode.InlayHintLabelPart(`← ${declarationAt(document, pair)} · `), start = new vscode.InlayHintLabelPart(`L${startLine}`), end = new vscode.InlayHintLabelPart(`–L${endLine} · `), count = new vscode.InlayHintLabelPart(`${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`);
+		owner.tooltip = 'Select this block from the beginning of its opening line';
+		owner.command = { command: 'syntaxstitch.selectPairLabelLines', title: 'Select block including opening line', arguments: [target] };
 		start.tooltip = `Go to opening line ${startLine}`;
 		start.command = { command: 'syntaxstitch.goToPairStart', title: `Go to line ${startLine}`, arguments: [target] };
-		const hint = new vscode.InlayHint(position, [owner, start, details]);
+		count.tooltip = 'Select the exact structural block';
+		count.command = { command: 'syntaxstitch.selectPairLabel', title: 'Select structural block', arguments: [target] };
+		const hint = new vscode.InlayHint(position, [owner, start, end, count]);
 		hint.paddingLeft = true;
 		hint.tooltip = `SyntaxStitch pair spans lines ${startLine}–${endLine} (${lineCount} ${lineCount === 1 ? 'line' : 'lines'}).`;
 		return [hint];
@@ -239,6 +241,12 @@ export function activate(context: vscode.ExtensionContext): void {
 	const pairLabelsChanged = new vscode.EventEmitter<void>();
 	const counter = new RepairCounter(context);
 	const refreshLabels = (): void => pairLabelsChanged.fire();
+	const pairLabelEditor = async (target: PairLabelTarget): Promise<vscode.TextEditor> => vscode.window.showTextDocument(vscode.Uri.parse(target.uri), { preserveFocus: false, preview: false });
+	const pairAtTarget = (editor: vscode.TextEditor, target: PairLabelTarget) => {
+		index(editor.document);
+		return states.get(keyOf(editor.document))!.shadow.pairs.find(pair => pair.openIdx === target.openIdx && pair.closeIdx === target.closeIdx)
+			?? states.get(keyOf(editor.document))!.shadow.pairs.filter(pair => pair.openIdx <= target.openIdx && pair.closeIdx >= target.closeIdx).sort((left, right) => left.closeIdx - left.openIdx - (right.closeIdx - right.openIdx))[0];
+	};
 	status.name = OUTPUT_NAME;
 	status.command = 'syntaxstitch.showMenu';
 	refreshStatus(status, counter);
@@ -346,23 +354,25 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.commands.registerCommand('syntaxstitch.structuralTab', structuralTab),
 		vscode.commands.registerCommand('syntaxstitch.tabToNextClosingTag', structuralTab),
-		vscode.commands.registerCommand('syntaxstitch.selectPairLabel', (target: PairLabelTarget) => {
-			const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document.uri.toString() === target.uri);
-			if (!editor || editor.document.version !== target.version) { return false; }
-			index(editor.document);
-			const shadow = states.get(keyOf(editor.document))!.shadow, pair = shadow.pairs.find(candidate => candidate.id === target.pairId), span = pair && shadow.selectionSpan(pair.closeIdx);
+		vscode.commands.registerCommand('syntaxstitch.selectPairLabel', async (target: PairLabelTarget) => {
+			const editor = await pairLabelEditor(target), shadow = states.get(keyOf(editor.document))!.shadow, pair = pairAtTarget(editor, target), span = pair && shadow.selectionSpan(pair.closeIdx);
 			if (!span) { return false; }
 			editor.selection = new vscode.Selection(editor.document.positionAt(span.start), editor.document.positionAt(span.end));
 			editor.revealRange(editor.selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 			return true;
 		}),
-		vscode.commands.registerCommand('syntaxstitch.goToPairStart', (target: PairLabelTarget) => {
-			const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document.uri.toString() === target.uri);
-			if (!editor || editor.document.version !== target.version) { return false; }
-			index(editor.document);
-			const pair = states.get(keyOf(editor.document))!.shadow.pairs.find(candidate => candidate.id === target.pairId);
+		vscode.commands.registerCommand('syntaxstitch.selectPairLabelLines', async (target: PairLabelTarget) => {
+			const editor = await pairLabelEditor(target), pair = pairAtTarget(editor, target);
 			if (!pair) { return false; }
-			const position = editor.document.positionAt(pair.openIdx);
+			const open = editor.document.positionAt(pair.openIdx), close = editor.document.positionAt(pair.closeIdx), start = new vscode.Position(open.line, 0), end = new vscode.Position(close.line, editor.document.lineAt(close.line).text.length);
+			editor.selection = new vscode.Selection(start, end);
+			editor.revealRange(editor.selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+			return true;
+		}),
+		vscode.commands.registerCommand('syntaxstitch.goToPairStart', async (target: PairLabelTarget) => {
+			const editor = await pairLabelEditor(target), pair = pairAtTarget(editor, target);
+			if (!pair) { return false; }
+			const position = new vscode.Position(editor.document.positionAt(pair.openIdx).line, 0);
 			editor.selection = new vscode.Selection(position, position);
 			editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 			return true;

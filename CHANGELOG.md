@@ -11,8 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Added
 
 - Add Venmo and Cash App links for supporting continued development.
-- Make closing-boundary ownership labels clickable to select their complete structural block.
-- Show start line, end line, and total line count on each pair label, with a clickable start line that jumps to the opener.
+- Make closing-boundary ownership labels clickable to select their block from the beginning of its opening line.
+- Show start line, end line, and total line count on each pair label; click the start line to jump to its first column or the line count to select the exact structural pair.
 
 ## 0.0.2 - 2026-08-31
 

@@ -148,7 +148,7 @@
             "Show ownership labels at multiline, line-leading closing braces and tags."
           ],
           "default": "all",
-          "description": "Render clickable inlay labels with pair ownership, start and end lines, line count, block selection, and opener navigation."
+          "description": "Render clickable inlay labels with pair ownership, line-span metadata, full-line selection, opener navigation, and exact structural selection."
         },
         "syntaxstitch.fixClosingIndentation": {
           "type": "boolean",
