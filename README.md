@@ -16,7 +16,7 @@ No cloud service. No source upload. No setup required.
 | --- | --- | --- |
 | Brackets | `()`, `[]`, `{}` | Restores one deleted side when its indexed partner would otherwise be orphaned. Deletes the whole pair when its interior is only whitespace. |
 | Quotes | `'...'`, `"..."`, `` `...` ``, `'''...'''`, `"""..."""` | Restores one deleted quote without treating quoted braces or tags as structure. Includes HTML attribute quotes and JavaScript template literals. |
-| Markup tags | `<section>...</section>` | Restores an orphaned boundary, or deletes both tags when their interior is only whitespace. |
+| Markup tags | `<section>...</section>` | Synchronizes tag-name edits, restores a damaged boundary, removes the counterpart when one complete tag is deleted exactly, or deletes both tags and whitespace when the element is empty. |
 | Python indentation | Indent and dedent boundaries | Tracks block boundaries and repairs an orphaned side. |
 | Closing-brace indentation | Line-leading `}` | Realigns a changed closer with its matched opening brace. |
 
@@ -30,8 +30,8 @@ SyntaxStitch is enabled by default for JavaScript, TypeScript, JSON, HTML, XML, 
 - Exact token restoration for one-sided brace and tag deletion.
 - Guarded repair edits that cannot recursively trigger more repairs.
 - JSON Lines records in the **SyntaxStitch** output channel for agent/tool synchronization.
-- Persistent workspace repair statistics split into `[square]`, `(parenthesis)`, `{curly}`, `<tag>`, `"quote"`, and `t indentation` counters.
-- Accessible status-bar control showing state and total repairs; click it for toggle, statistics, reset, output, and reindex actions.
+- Persistent workspace repair statistics split across `()`, `[]`, `{}`, `<>`, `""`, and `\t` structures.
+- Compact, accessible `{S} total` status-bar control; hover for the per-structure breakdown or click for actions.
 - An inline `owner L12↔L28 17 Lines` label after each closing boundary, where `owner` is the declaration or opening tag. Modifier-click the owner to select its defining statement and block, `↔` to select the content between delimiters, either line number to select that line, or the line count to select the complete range. Hover the owner for folding and structural selection actions. **Fold / unfold contents** folds every collapsible child; when all children are folded, it unfolds only the direct children.
 - Localized closing-brace indentation repair based on the matched opening brace.
 - Context-aware Structural Tab navigation through closing tags and across correctly indented line-leading `}` boundaries.
@@ -49,7 +49,10 @@ SyntaxStitch distinguishes an accidental one-sided edit from a deliberate struct
 | Edit | Response | Why |
 | --- | --- | --- |
 | Delete one side of a whitespace-only `()`, `[]`, `{}`, quote, or paired tag | Remove the surviving boundary and interior whitespace. | An empty pair behaves as one unit, so restoring half of it would interfere with ordinary cleanup. |
-| Delete one side of a pair containing code, comments, or text | Restore the missing boundary. | Meaningful content still needs its structural owner. Comments count as meaningful content. |
+| Delete exactly one complete opening or closing tag | Remove its indexed counterpart and preserve the element contents. | Selecting the whole tag is explicit intent to unwrap the element. |
+| Delete either boundary of standalone grouping parentheses such as `(cat)` | Remove its indexed counterpart and preserve `cat`. | A same-line grouping edit is explicit intent to unwrap the expression; call arguments remain protected. |
+| Replace an opening or closing tag name, including delete-then-type editing | Apply the same name to its indexed counterpart. | Ordinary `<section>` to `<div>` editing should remain fluid without creating a mismatched closing tag. |
+| Delete one side of a brace, call parenthesis, bracket, or quote containing code, comments, or text | Restore the missing boundary. | Meaningful content still needs its structural owner. Comments count as meaningful content. |
 | Backspace/Delete a meaningful closing boundary directly | Restore it and select the complete pair, such as `{ ... }`, `(x, y)`, or `<p>...</p>`. | Selecting the restored structure makes the repair visible and gives the next edit an explicit target. |
 | Delete part of a multi-character boundary such as the `>` in `</p>` | Replace the surviving `</p` fragment with exactly one complete `</p>`. | Replacing the damaged token in place avoids duplicating a full tag behind its surviving fragment. |
 | An HTML provider inserts adjacent `<p></p>` and leaves the cursor after `</p>` | Move the cursor between `<p>` and `</p>`. | The provider generates the tags; SyntaxStitch only corrects the temporary caret position so typing can continue inside the element. |
@@ -150,5 +153,7 @@ SyntaxStitch runs entirely inside the VS Code Extension Host. It does not transm
 ## Limitations
 
 The stable VS Code extension API does not expose a hook that can block or mutate edits before language services observe them, nor can an extension inject an actual system message into an upstream AI agent. SyntaxStitch therefore performs the earliest supported guarded repair from `workspace.onDidChangeTextDocument` and emits a machine-readable synchronization record to its output channel.
+
+The same change event does not identify whether an edit came from AI, another extension, paste, or another programmatic source. SyntaxStitch recognizes edits routed through its own keyboard commands, but it does not label other edits as AI without a reliable source signal.
 
 SyntaxStitch protects indexed structural pairs with a lightweight context-aware scanner; it is not a full language parser, formatter, linter, or substitute for source control. Embedded language detection currently covers script/style blocks, JavaScript template markup, and JSX/TSX. Review repaired edits just as you would review edits from any other coding tool.

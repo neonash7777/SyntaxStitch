@@ -4,7 +4,7 @@ import type * as vscode from 'vscode';
 // region Types & State
 export type BlockType = 'brace' | 'tag' | 'quote' | 'indent';
 export type RepairKind = 'square' | 'parenthesis' | 'curly' | 'tag' | 'quote' | 'indent';
-export type TokenPair = { id: string; openIdx: number; closeIdx: number; type: BlockType; languageId: string };
+export type TokenPair = { id: string; openIdx: number; closeIdx: number; type: BlockType; languageId: string; openToken: string; closeToken: string };
 export type RepairPatch = { offset: number; deleteLength: number; text: string; pairId: string; side: 'open' | 'close'; blockType: BlockType; kind: RepairKind };
 export type SelectionSpan = { start: number; end: number };
 
@@ -188,6 +188,20 @@ const counterpartRebound = (pair: PairRecord, side: 'open' | 'close', changes: r
 	const scopedPairs = resultingPairs.filter(candidate => candidate.languageId === pair.languageId);
 	return scopedPairs.length >= originalPairCount && scopedPairs.some(candidate => candidate.type === pair.type && candidate[endpoint] === mappedIdx && sameBoundary(candidate[token], pair[token], pair.type));
 };
+const removeExactTagPair = (pair: PairRecord, side: 'open' | 'close', change: Change, changes: readonly Change[]): Pick<RepairPatch, 'offset' | 'deleteLength' | 'text'> | undefined => {
+	const token = side === 'open' ? pair.openToken : pair.closeToken, tokenIdx = side === 'open' ? pair.openIdx : pair.closeIdx;
+	if (pair.type !== 'tag' || change.text || change.rangeOffset !== tokenIdx || change.rangeLength !== token.length) { return undefined; }
+	const counterpart = side === 'open' ? pair.closeToken : pair.openToken, counterpartIdx = side === 'open' ? pair.closeIdx : pair.openIdx;
+	const offset = mapOffset(counterpartIdx, changes, false), end = mapOffset(counterpartIdx + counterpart.length, changes, true);
+	return { offset, deleteLength: Math.max(0, end - offset), text: '' };
+};
+const removeExactGroupingPair = (source: string, pair: PairRecord, side: 'open' | 'close', change: Change, changes: readonly Change[]): Pick<RepairPatch, 'offset' | 'deleteLength' | 'text'> | undefined => {
+	const token = side === 'open' ? pair.openToken : pair.closeToken, tokenIdx = side === 'open' ? pair.openIdx : pair.closeIdx, previous = source.slice(0, pair.openIdx).match(/\S(?=\s*$)/)?.[0];
+	if (pair.type !== 'brace' || pair.openToken !== '(' || change.text || change.rangeOffset !== tokenIdx || change.rangeLength !== token.length || (previous && /[\w$.)\]]/.test(previous))) { return undefined; }
+	const counterpartIdx = side === 'open' ? pair.closeIdx : pair.openIdx, counterpart = side === 'open' ? pair.closeToken : pair.openToken;
+	const offset = mapOffset(counterpartIdx, changes, false), end = mapOffset(counterpartIdx + counterpart.length, changes, true);
+	return { offset, deleteLength: Math.max(0, end - offset), text: '' };
+};
 const removeEmptyPair = (pair: PairRecord, side: 'open' | 'close', change: Change, changes: readonly Change[], resultingText: string): Pick<RepairPatch, 'offset' | 'deleteLength' | 'text'> | undefined => {
 	if (pair.type === 'indent' || change.text) { return undefined; }
 	const offset = mapOffset(pair.openIdx, changes, false), end = mapOffset(pair.closeIdx + pair.closeToken.length, changes, false);
@@ -208,15 +222,17 @@ const compactBeforeCloser = (pair: PairRecord, side: 'open' | 'close', change: C
 export class ShadowStructure implements IShadowStructure {
 	readonly #pairs = new Map<string, PairRecord>();
 	#languageId = 'plaintext';
+	#source = '';
 
 	constructor(text = '', languageId = 'plaintext') { this.reindex(text, languageId); }
 
-	get pairs(): readonly TokenPair[] { return [...this.#pairs.values()].map(({ id, openIdx, closeIdx, type, languageId }) => ({ id, openIdx, closeIdx, type, languageId })); }
+	get pairs(): readonly TokenPair[] { return [...this.#pairs.values()].map(({ id, openIdx, closeIdx, type, languageId, openToken, closeToken }) => ({ id, openIdx, closeIdx, type, languageId, openToken, closeToken })); }
 
 	reindex(text: string, languageId = 'plaintext'): void {
 		const previous = [...this.#pairs.values()];
 		const indexed = indexDocument(text, languageId);
 		this.#languageId = languageId;
+		this.#source = text;
 		this.#pairs.clear();
 		for (const pair of indexed) {
 			const candidates = previous.map((record, idx) => ({ record, idx })).filter(({ record }) => record.type === pair.type && record.languageId === pair.languageId && sameBoundary(record.openToken, pair.openToken, pair.type) && sameBoundary(record.closeToken, pair.closeToken, pair.type));
@@ -282,7 +298,8 @@ export class ShadowStructure implements IShadowStructure {
 				if (fullyTouched.has(pair.id)) { continue; }
 				const openHit = overlaps(start, end, pair.openIdx, pair.openToken.length), side = openHit ? 'open' : 'close';
 				if (suppliesEquivalent(change.text, pair, side)) { continue; }
-				const pairRemoval = resultingText === undefined ? undefined : removeEmptyPair(pair, side, change, changes, resultingText);
+				const emptyPairRemoval = resultingText === undefined ? undefined : removeEmptyPair(pair, side, change, changes, resultingText);
+				const pairRemoval = emptyPairRemoval ?? removeExactTagPair(pair, side, change, changes) ?? removeExactGroupingPair(this.#source, pair, side, change, changes);
 				const originalPairCount = [...this.#pairs.values()].filter(candidate => candidate.type === pair.type && candidate.languageId === pair.languageId).length;
 				if (!pairRemoval && resultingText !== undefined && counterpartRebound(pair, side, changes, resultingPairs.get(pair.type) ?? [], originalPairCount)) { continue; }
 				const compaction = resultingText === undefined || pairRemoval ? undefined : compactBeforeCloser(pair, side, change, changes, resultingText);

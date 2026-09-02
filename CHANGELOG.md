@@ -11,6 +11,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 
 - Improve documentation grammar and clarify edit intent, pair-label actions, language ownership, structural selection, and release instructions.
+- Reduce the status-bar item to `{S} total` and move the `()`, `[]`, `{}`, `<>`, `""`, and `\t` breakdown into its tooltip.
+- Document that VS Code change events do not reliably identify AI-authored edits, preventing trustworthy AI-specific repair counts.
+- Show a pair label for every multiline structure when nested closing tokens such as `))}` share a line.
+- Treat deletion of exactly one complete markup tag as intentional unwrapping by removing its indexed counterpart while preserving nested content.
+- Treat deletion of either boundary of standalone grouping parentheses such as `(cat)` as intentional unwrapping while preserving call parentheses.
+- Synchronize opening and closing tag names during direct replacement or delete-then-type editing without counting the intentional edit as a repair.
 
 ## 0.0.3 - 2026-08-31
 

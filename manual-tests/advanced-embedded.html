@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>SyntaxStitch embedded language lab</title>
+    <style>
+        :root {
+            --accent: #ff4f87;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        @media (max-width: 48rem) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main class="dashboard">
+        <section data-panel="totals">
+            <header>
+                <h1>Embedded JavaScript and CSS</h1>
+            </header>
+            <output id="result"></output>
+        </section>
+    </main>
+
+    <script>
+        const groups = [
+            { name: "primary", values: [4, 8, 15] },
+            { name: "secondary", values: [16, 23, 42] },
+        ];
+
+        const summary = groups.map(({ name, values }) => ({
+            name,
+            total: values.reduce((sum, value) => sum + value, 0),
+            details: values.map(value => ({ value, even: value % 2 === 0 })),
+        }));
+
+        document.querySelector("#result").textContent = JSON.stringify({
+            generatedAt: new Date().toISOString(),
+            summary,
+        }, null, 2);
+    </script>
+</body>
+</html>

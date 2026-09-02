@@ -3,7 +3,7 @@ import { ShadowStructure, type BlockType, type RepairKind, type RepairPatch, typ
 
 // region State
 type DocumentState = { shadow: ShadowStructure; languageId: string };
-type RepairStatistics = { total: number; byKind: Record<RepairKind, number>; unclassified: number; lastAt?: string; lastUri?: string };
+export type RepairStatistics = { total: number; byKind: Record<RepairKind, number>; unclassified: number; lastAt?: string; lastUri?: string };
 type LegacyRepairStatistics = { total: number; byType?: Partial<Record<BlockType, number>>; lastAt?: string; lastUri?: string };
 const states = new Map<string, DocumentState>();
 const repairing = new Set<string>();
@@ -19,6 +19,8 @@ const selectionHistory = new WeakMap<vscode.TextEditor, SelectionTransition[]>()
 type DirectDeletion = { editor: vscode.TextEditor; direction: 'left' | 'right'; offset: number; completed: Promise<void>; complete: () => void; selection?: vscode.Selection };
 const directDeletions = new Map<string, DirectDeletion>();
 const pendingTagCarets = new WeakMap<vscode.TextEditor, { afterOpen: number; afterClose: number; version: number; expiresAt: number }>();
+type PendingTagRename = { tokenStart: number; counterpartNameStart: number; counterpartNameLength: number };
+const pendingTagRenames = new Map<string, PendingTagRename>();
 
 const snapshotSelections = (editor: vscode.TextEditor): SelectionSnapshot => editor.selections.map(selection => ({ anchor: editor.document.offsetAt(selection.anchor), active: editor.document.offsetAt(selection.active) }));
 const selectionsMatch = (left: SelectionSnapshot, right: SelectionSnapshot): boolean => left.length === right.length && left.every((selection, index) => selection.anchor === right[index].anchor && selection.active === right[index].active);
@@ -57,6 +59,18 @@ class RepairCounter {
 }
 
 const keyOf = (document: vscode.TextDocument): string => document.uri.toString();
+const tagNameRange = (token: string, tokenStart: number): { start: number; end: number } | undefined => {
+	const match = token.match(/^<\s*\/?\s*([A-Za-z][\w:.-]*)/), name = match?.[1];
+	if (!match || !name) { return undefined; }
+	const start = tokenStart + match[0].lastIndexOf(name);
+	return { start, end: start + name.length };
+};
+const tagNameAt = (text: string, tokenStart: number): { name: string; start: number; end: number } | undefined => {
+	const match = text.slice(tokenStart, tokenStart + 128).match(/^<\s*\/?\s*([A-Za-z][\w:.-]*)[^<>]*>/), name = match?.[1];
+	if (!match || !name) { return undefined; }
+	const start = tokenStart + match[0].indexOf(name);
+	return { name, start, end: start + name.length };
+};
 const enabledSetting = (uri?: vscode.Uri): boolean => vscode.workspace.getConfiguration(CONFIG_SECTION, uri).get('enabled', true);
 const isEnabled = (document: vscode.TextDocument): boolean => {
 	const config = vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri), languages = config.get<string[]>('languages', []);
@@ -93,12 +107,17 @@ const planClosingIndentRepairs = (document: vscode.TextDocument, changes: readon
 		return actual === expected ? [] : [{ offset: document.offsetAt(new vscode.Position(close.line, 0)), deleteLength: actual.length, text: expected, pairId: pair.id, side: 'close' as const, blockType: 'indent' as const, kind: 'indent' as const }];
 	});
 };
+export const repairStatusPresentation = (statistics: Readonly<RepairStatistics>, enabled: boolean): { text: string; tooltip: string; accessibilityLabel: string } => {
+	const state = enabled ? 'enabled' : 'disabled', { total, byKind, unclassified } = statistics;
+	const details = [`()  Parentheses: ${byKind.parenthesis}`, `[]  Square brackets: ${byKind.square}`, `{}  Curly braces: ${byKind.curly}`, `<>  Tags: ${byKind.tag}`, `""  Quotes: ${byKind.quote}`, `\\t  Indentation: ${byKind.indent}`];
+	if (unclassified) { details.push(`?  Legacy unclassified: ${unclassified}`); }
+	return { text: `{S} ${total}`, tooltip: `SyntaxStitch is ${state}.\n\n${total} repairs\n${details.join('\n')}\n\nClick for actions.`, accessibilityLabel: `SyntaxStitch is ${state} with ${total} repairs. Activate for actions.` };
+};
 const refreshStatus = (status: vscode.StatusBarItem, counter: RepairCounter): void => {
-	const enabled = enabledSetting(vscode.window.activeTextEditor?.document.uri), state = enabled ? 'enabled' : 'disabled';
-	const { total, byKind, unclassified } = counter.statistics, compact = `[${byKind.square}] (${byKind.parenthesis}) {${byKind.curly}} <${byKind.tag}> "${byKind.quote}" t${byKind.indent}${unclassified ? ` ?${unclassified}` : ''}`;
-	status.text = `${enabled ? '$(shield)' : '$(circle-slash)'} ${compact}`;
-	status.tooltip = `SyntaxStitch is ${state}. ${total} repairs: ${byKind.square} square, ${byKind.parenthesis} parenthesis, ${byKind.curly} curly, ${byKind.tag} tag, ${byKind.quote} quote, ${byKind.indent} indentation${unclassified ? `, ${unclassified} legacy unclassified` : ''}. Click for actions.`;
-	status.accessibilityInformation = { label: `SyntaxStitch is ${state} with ${total} repairs. Activate for actions.` };
+	const presentation = repairStatusPresentation(counter.statistics, enabledSetting(vscode.window.activeTextEditor?.document.uri));
+	status.text = presentation.text;
+	status.tooltip = presentation.tooltip;
+	status.accessibilityInformation = { label: presentation.accessibilityLabel };
 };
 const log = (output: vscode.OutputChannel, uri: vscode.Uri | undefined, level: Exclude<LogLevel, 'off'>, record: object): void => {
 	const configured = vscode.workspace.getConfiguration(CONFIG_SECTION, uri).get<LogLevel>('logLevel', 'repairs');
@@ -133,15 +152,15 @@ const labelPosition = (document: vscode.TextDocument, pair: { closeIdx: number; 
 };
 const isMultilineBoundary = (document: vscode.TextDocument, pair: { openIdx: number; closeIdx: number }): boolean => {
 	const open = document.positionAt(pair.openIdx), close = document.positionAt(pair.closeIdx);
-	return open.line < close.line && document.lineAt(close.line).text.slice(0, close.character).trim() === '';
+	return open.line < close.line;
 };
-type PairLabelTarget = { uri: string; openIdx: number; closeIdx: number };
-const pairLabelTarget = (document: vscode.TextDocument, pair: { openIdx: number; closeIdx: number }): PairLabelTarget => ({ uri: document.uri.toString(), openIdx: pair.openIdx, closeIdx: pair.closeIdx });
+type PairLabelTarget = { uri: string; pairId: string; openIdx: number; closeIdx: number };
+const pairLabelTarget = (document: vscode.TextDocument, pair: { id: string; openIdx: number; closeIdx: number }): PairLabelTarget => ({ uri: document.uri.toString(), pairId: pair.id, openIdx: pair.openIdx, closeIdx: pair.closeIdx });
 const pairCommandLink = (title: string, command: string, target: PairLabelTarget): string => `[${title}](command:${command}?${encodeURIComponent(JSON.stringify([target]))})`;
 const pairActionLink = (title: string, icon: string, command: string, target: PairLabelTarget): string => `\$(${icon}) [${title}](command:${command}?${encodeURIComponent(JSON.stringify([target]))})`;
 const compactDeclaration = (declaration: string, maximumLength: number): string => {
 	if (declaration.length <= maximumLength) { return declaration; }
-	const tag = declaration.match(/^<\/?([\w.-]+)/), named = declaration.match(/\b(class|interface|enum|struct|function|def)\s+([\w$]+)/), callable = declaration.match(/([\w$]+)\s*\(/);
+	const tag = declaration.match(/^<\/?([\w.-]+)/), named = declaration.match(/\b(class|interface|enum|struct|function|def)\s+([\w$]+)/), callable = declaration.match(/([\w$]+)$/) ?? declaration.match(/([\w$]+)\s*\([^()]*\)\s*$/);
 	for (const candidate of [tag && `<${tag[1]}>`, named && `${named[1]} ${named[2]}`, callable && `${callable[1]}()`, 'block']) {
 		if (candidate && candidate.length <= maximumLength) { return candidate; }
 	}
@@ -222,7 +241,7 @@ const protectedCloserIntent = (event: vscode.TextDocumentChangeEvent, patches: r
 	if (!editor || !deletion || editor.document !== event.document || event.contentChanges.length !== 1 || !change || change.text || change.rangeLength !== 1) { return undefined; }
 	const expectedOffset = deletion.direction === 'left' ? change.rangeOffset + change.rangeLength : change.rangeOffset;
 	if (deletion.offset !== expectedOffset) { return undefined; }
-	const patch = patches.find(candidate => (candidate.blockType === 'brace' || candidate.blockType === 'tag') && candidate.side === 'close');
+	const patch = patches.find(candidate => candidate.text && (candidate.blockType === 'brace' || candidate.blockType === 'tag') && candidate.side === 'close');
 	if (patch) { directDeletions.delete(keyOf(event.document)); }
 	return patch ? { deletion, pairId: patch.pairId, blockType: patch.blockType, stepInside: patch.blockType === 'brace' && ')]}'.includes(event.document.getText()[change.rangeOffset - 1] ?? '') } : undefined;
 };
@@ -232,6 +251,40 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 	if (repairing.has(key) || !event.contentChanges.length) { index(document); return; }
 	const state = states.get(key);
 	if (!state || state.languageId !== document.languageId) { index(document); return; }
+	const pendingRename = pendingTagRenames.get(key), change = event.contentChanges.length === 1 ? event.contentChanges[0] : undefined;
+	if (pendingRename && change) {
+		const delta = change.text.length - change.rangeLength, counterpartNameStart = pendingRename.counterpartNameStart + (change.rangeOffset <= pendingRename.counterpartNameStart ? delta : 0), renamed = tagNameAt(document.getText(), pendingRename.tokenStart);
+		if (renamed && change.rangeOffset >= pendingRename.tokenStart && change.rangeOffset <= renamed.end) {
+			pendingTagRenames.delete(key);
+			const edit = new vscode.WorkspaceEdit();
+			edit.replace(document.uri, new vscode.Range(document.positionAt(counterpartNameStart), document.positionAt(counterpartNameStart + pendingRename.counterpartNameLength)), renamed.name);
+			repairing.add(key);
+			try { await vscode.workspace.applyEdit(edit); } finally { repairing.delete(key); index(document); }
+			return;
+		}
+		pendingTagRenames.delete(key);
+	}
+	if (event.contentChanges.length) {
+		const pair = state.shadow.pairs.find(candidate => candidate.type === 'tag' && [
+			{ side: 'open' as const, token: candidate.openToken, tokenStart: candidate.openIdx, counterpart: candidate.closeToken, counterpartStart: candidate.closeIdx },
+			{ side: 'close' as const, token: candidate.closeToken, tokenStart: candidate.closeIdx, counterpart: candidate.openToken, counterpartStart: candidate.openIdx },
+		].some(({ token, tokenStart }) => { const name = tagNameRange(token, tokenStart); return !!name && event.contentChanges.every(candidate => name.start <= candidate.rangeOffset && candidate.rangeOffset + candidate.rangeLength <= name.end); }));
+		if (pair) {
+			const openName = tagNameRange(pair.openToken, pair.openIdx)!, closeName = tagNameRange(pair.closeToken, pair.closeIdx)!, editingOpen = event.contentChanges.every(candidate => openName.start <= candidate.rangeOffset && candidate.rangeOffset + candidate.rangeLength <= openName.end);
+			const tokenStart = editingOpen ? pair.openIdx : pair.closeIdx, counterpart = editingOpen ? closeName : openName, counterpartStart = counterpart.start + event.contentChanges.filter(candidate => candidate.rangeOffset <= counterpart.start).reduce((offset, candidate) => offset + candidate.text.length - candidate.rangeLength, 0), renamed = tagNameAt(document.getText(), tokenStart);
+			if (!renamed && change && !change.text && change.rangeOffset === (editingOpen ? openName.start : closeName.start) && change.rangeLength === (editingOpen ? openName.end - openName.start : closeName.end - closeName.start)) {
+				pendingTagRenames.set(key, { tokenStart, counterpartNameStart: counterpartStart, counterpartNameLength: counterpart.end - counterpart.start });
+				return;
+			}
+			if (renamed) {
+				const edit = new vscode.WorkspaceEdit();
+				edit.replace(document.uri, new vscode.Range(document.positionAt(counterpartStart), document.positionAt(counterpartStart + counterpart.end - counterpart.start)), renamed.name);
+				repairing.add(key);
+				try { await vscode.workspace.applyEdit(edit); } finally { repairing.delete(key); index(document); }
+				return;
+			}
+		}
+	}
 	const structures = vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri).get<BlockType[]>('structures', ['brace', 'tag', 'quote', 'indent']);
 	const structural = state.shadow.planRepairs(event.contentChanges, document.getText()).filter(patch => structures.includes(patch.blockType));
 	const plannedPatches = [...structural, ...planClosingIndentRepairs(document, event.contentChanges)].sort((left, right) => right.offset - left.offset);
@@ -275,8 +328,10 @@ export function activate(context: vscode.ExtensionContext): void {
 	const pairLabelEditor = async (target: PairLabelTarget): Promise<vscode.TextEditor> => vscode.window.showTextDocument(vscode.Uri.parse(target.uri), { preserveFocus: false, preview: false });
 	const pairAtTarget = (editor: vscode.TextEditor, target: PairLabelTarget) => {
 		index(editor.document);
-		return states.get(keyOf(editor.document))!.shadow.pairs.find(pair => pair.openIdx === target.openIdx && pair.closeIdx === target.closeIdx)
-			?? states.get(keyOf(editor.document))!.shadow.pairs.filter(pair => pair.openIdx <= target.openIdx && pair.closeIdx >= target.closeIdx).sort((left, right) => left.closeIdx - left.openIdx - (right.closeIdx - right.openIdx))[0];
+		const pairs = states.get(keyOf(editor.document))!.shadow.pairs;
+		return pairs.find(pair => pair.id === target.pairId)
+			?? pairs.find(pair => pair.openIdx === target.openIdx && pair.closeIdx === target.closeIdx)
+			?? pairs.filter(pair => pair.openIdx <= target.openIdx && pair.closeIdx === target.closeIdx).sort((left, right) => right.openIdx - left.openIdx)[0];
 	};
 	const pairTokenEnd = (document: vscode.TextDocument, pair: TokenPair, side: 'open' | 'close'): number => {
 		const offset = side === 'open' ? pair.openIdx : pair.closeIdx;
@@ -431,7 +486,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('syntaxstitch.selectPairWithDeclaration', async (target: PairLabelTarget) => {
 			const editor = await pairLabelEditor(target), pair = pairAtTarget(editor, target);
 			if (!pair) { return false; }
-			const start = declarationStart(editor.document, pair), end = editor.document.positionAt(pairTokenEnd(editor.document, pair, 'close'));
+			const opener = editor.document.getText()[pair.openIdx], start = opener === '(' || opener === '[' ? editor.document.positionAt(pair.openIdx) : declarationStart(editor.document, pair), end = editor.document.positionAt(pairTokenEnd(editor.document, pair, 'close'));
 			editor.selection = new vscode.Selection(start, end);
 			editor.revealRange(editor.selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 			return true;

@@ -1,5 +1,8 @@
 import * as assert from 'assert';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { repairStatusPresentation } from '../extension';
 import { ShadowStructure } from '../shadowStructure';
 
 const change = (text: string, start: number, length: number, replacement = ''): vscode.TextDocumentContentChangeEvent => ({
@@ -13,6 +16,18 @@ const applyRepair = (text: string, edit: vscode.TextDocumentContentChangeEvent, 
 	for (const patch of shadow.planRepairs([edit])) { result = `${result.slice(0, patch.offset)}${patch.text}${result.slice(patch.offset + patch.deleteLength)}`; }
 	return result;
 };
+const manualFixture = (name: string): string => fs.readFileSync(path.join(__dirname, '..', '..', 'manual-tests', name), 'utf8');
+const maximumPairDepth = (shadow: ShadowStructure): number => Math.max(...shadow.pairs.map(candidate => shadow.pairs.filter(pair => pair.openIdx <= candidate.openIdx && candidate.closeIdx <= pair.closeIdx).length));
+
+suite('Status presentation', () => {
+	test('keeps the tray compact and puts symbol counts in the tooltip', () => {
+		const presentation = repairStatusPresentation({ total: 1234, byKind: { square: 2, parenthesis: 3, curly: 5, tag: 7, quote: 11, indent: 13 }, unclassified: 0 }, true);
+		assert.strictEqual(presentation.text, '{S} 1234');
+		for (const detail of ['()  Parentheses: 3', '[]  Square brackets: 2', '{}  Curly braces: 5', '<>  Tags: 7', '""  Quotes: 11', '\\t  Indentation: 13']) { assert.ok(presentation.tooltip.includes(detail)); }
+		assert.ok(presentation.tooltip.startsWith('SyntaxStitch is enabled.'));
+		assert.ok(presentation.tooltip.includes('1234 repairs\n()') && !presentation.tooltip.includes('1234 repairs\n\n'));
+	});
+});
 
 suite('ShadowStructure', () => {
 	test('restores either deleted half of a brace pair', () => {
@@ -72,6 +87,20 @@ suite('ShadowStructure', () => {
 		assert.ok(!shadow.pairs.some(pair => pair.type === 'brace' && pair.openIdx === text.lastIndexOf('{')));
 	});
 
+	test('advanced manual fixtures retain embedded languages and deep nesting', () => {
+		const cases = [
+			{ name: 'advanced-embedded.html', languageId: 'html', languages: ['html', 'css', 'javascript'], minimumPairs: 25, minimumDepth: 5 },
+			{ name: 'advanced-component.tsx', languageId: 'typescriptreact', languages: ['typescriptreact', 'html'], minimumPairs: 25, minimumDepth: 7 },
+			{ name: 'advanced-nested.js', languageId: 'javascript', languages: ['javascript', 'html'], minimumPairs: 30, minimumDepth: 6 },
+		];
+		for (const fixture of cases) {
+			const shadow = new ShadowStructure(manualFixture(fixture.name), fixture.languageId), languages = new Set(shadow.pairs.map(pair => pair.languageId));
+			assert.ok(shadow.pairs.length >= fixture.minimumPairs, `${fixture.name} should contain at least ${fixture.minimumPairs} indexed pairs`);
+			assert.ok(maximumPairDepth(shadow) >= fixture.minimumDepth, `${fixture.name} should nest at least ${fixture.minimumDepth} pairs deep`);
+			for (const language of fixture.languages) { assert.ok(languages.has(language), `${fixture.name} should include ${language} pairs`); }
+		}
+	});
+
 	test('pairs code quotes without indexing their structural content', () => {
 		const text = 'const value = "<fake>{[( content )]} </fake>"; call(value);', shadow = new ShadowStructure(text, 'javascript');
 		const quote = shadow.pairs.find(pair => pair.type === 'quote');
@@ -109,6 +138,27 @@ suite('ShadowStructure', () => {
 		assert.strictEqual(applyDeletion('<section>\n</section>', 'html', '</section>'), '');
 		assert.strictEqual(applyDeletion('call(value)', 'javascript', ')'), 'call(value)');
 		assert.strictEqual(applyDeletion('call(/* intentionally empty */)', 'javascript', ')'), 'call(/* intentionally empty */)');
+	});
+
+	test('removes the corresponding tag when exactly one complete tag is deleted', () => {
+		const removeTag = (text: string, token: string): string => {
+			const shadow = new ShadowStructure(text, 'html'), start = text.indexOf(token), edit = change(text, start, token.length), resulting = `${text.slice(0, start)}${text.slice(start + token.length)}`;
+			return shadow.planRepairs([edit], resulting).reduce((current, patch) => `${current.slice(0, patch.offset)}${patch.text}${current.slice(patch.offset + patch.deleteLength)}`, resulting);
+		};
+		const text = '<main><section class="report"><p>Keep me</p></section></main>';
+		assert.strictEqual(removeTag(text, '<section class="report">'), '<main><p>Keep me</p></main>');
+		assert.strictEqual(removeTag(text, '</section>'), '<main><p>Keep me</p></main>');
+	});
+
+	test('unwraps meaningful grouping parentheses when either boundary is deleted', () => {
+		const removeBoundary = (text: string, offset: number): string => {
+			const shadow = new ShadowStructure(text, 'javascript'), edit = change(text, offset, 1), resulting = `${text.slice(0, offset)}${text.slice(offset + 1)}`;
+			return shadow.planRepairs([edit], resulting).reduce((current, patch) => `${current.slice(0, patch.offset)}${patch.text}${current.slice(patch.offset + patch.deleteLength)}`, resulting);
+		};
+		assert.strictEqual(removeBoundary('(cat)', 0), 'cat');
+		assert.strictEqual(removeBoundary('(cat)', 4), 'cat');
+		assert.strictEqual(removeBoundary('const pet = (cat);', 'const pet = (cat);'.indexOf(')')), 'const pet = cat;');
+		assert.strictEqual(removeBoundary('call(cat)', 'call(cat)'.indexOf(')')), 'call(cat)');
 	});
 
 	test('allows coordinated boundary edits to unwrap meaningful content', () => {
@@ -187,9 +237,9 @@ suite('ShadowStructure', () => {
 		assert.deepStrictEqual(tags.planRepairs([change(markup, start, '<section class="old">'.length, '<section class="new">')]), []);
 	});
 
-	test('restores the exact deleted tag token', () => {
+	test('restores a partially deleted tag token', () => {
 		const text = '<section class="hero"><span>Hi</span></section>', shadow = new ShadowStructure(text, 'html'), start = text.indexOf('<section');
-		assert.strictEqual(shadow.planRepairs([change(text, start, '<section class="hero">'.length)])[0]?.text, '<section class="hero">');
+		assert.strictEqual(shadow.planRepairs([change(text, start, '<section class="hero">'.length - 1)])[0]?.text, '<section class="hero">');
 		const closeEnd = text.indexOf('</section>') + '</section>'.length, partial = shadow.planRepairs([change(text, closeEnd - 1, 1)], `${text.slice(0, closeEnd - 1)}${text.slice(closeEnd)}`)[0];
 		assert.deepStrictEqual([partial?.offset, partial?.deleteLength, partial?.text], [text.indexOf('</section>'), '</section'.length, '</section>']);
 	});
@@ -209,6 +259,12 @@ suite('ShadowStructure', () => {
 });
 
 suite('Extension integration', () => {
+	suiteSetup(async () => {
+		const extension = vscode.extensions.all.find(candidate => candidate.packageJSON.name === 'syntaxstitch');
+		assert.ok(extension, 'SyntaxStitch development extension was not loaded');
+		await extension.activate();
+	});
+
 	test('moves a meaningful block closer upward one line per deletion', async function () {
 		this.timeout(5000);
 		await vscode.commands.executeCommand('syntaxstitch.showOutput');
@@ -248,6 +304,18 @@ suite('Extension integration', () => {
 		const selectionDeadline = Date.now() + 1000;
 		while (editor.selection.isEmpty && Date.now() < selectionDeadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
 		assert.strictEqual(document.getText(editor.selection), '(x, y)');
+	});
+
+	test('unwraps standalone grouping parentheses with direct Backspace', async () => {
+		const document = await vscode.workspace.openTextDocument({ language: 'javascript', content: '(cat)' }), editor = await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const end = document.positionAt(document.getText().length);
+		editor.selection = new vscode.Selection(end, end);
+		await vscode.commands.executeCommand('syntaxstitch.deleteLeft');
+		const deadline = Date.now() + 1000;
+		while (document.getText() !== 'cat' && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+		assert.strictEqual(document.getText(), 'cat');
+		assert.ok(editor.selection.isEmpty);
 	});
 
 	test('selects a meaningful multiline block when its closer is directly deleted', async function () {
@@ -291,6 +359,41 @@ suite('Extension integration', () => {
 		while (document.offsetAt(editor.selection.active) !== '<p>'.length && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
 		assert.strictEqual(document.getText(), '<p></p>');
 		assert.strictEqual(document.offsetAt(editor.selection.active), '<p>'.length);
+	});
+
+	test('synchronizes opening tag name replacements without counting a repair', async () => {
+		await vscode.commands.executeCommand('syntaxstitch.resetStatistics');
+		const content = '<section><p>Keep me</p></section>', document = await vscode.workspace.openTextDocument({ language: 'html', content }), nameStart = content.indexOf('section');
+		await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const edit = new vscode.WorkspaceEdit();
+		edit.replace(document.uri, new vscode.Range(document.positionAt(nameStart), document.positionAt(nameStart + 'section'.length)), 'div');
+		assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+		const deadline = Date.now() + 1000;
+		while (document.getText() !== '<div><p>Keep me</p></div>' && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+		assert.strictEqual(document.getText(), '<div><p>Keep me</p></div>');
+		const statistics = await vscode.commands.executeCommand<{ total: number }>('syntaxstitch.showStatistics');
+		assert.strictEqual(statistics.total, 0);
+	});
+
+	test('allows deleting a tag name before typing its replacement', async () => {
+		await vscode.commands.executeCommand('syntaxstitch.resetStatistics');
+		const content = '<section><p>Keep me</p></section>', document = await vscode.workspace.openTextDocument({ language: 'html', content }), nameStart = content.indexOf('section');
+		await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const remove = new vscode.WorkspaceEdit();
+		remove.delete(document.uri, new vscode.Range(document.positionAt(nameStart), document.positionAt(nameStart + 'section'.length)));
+		assert.strictEqual(await vscode.workspace.applyEdit(remove), true);
+		await new Promise(resolve => setTimeout(resolve, 50));
+		assert.strictEqual(document.getText(), '<><p>Keep me</p></section>');
+		const insert = new vscode.WorkspaceEdit();
+		insert.insert(document.uri, document.positionAt(nameStart), 'div');
+		assert.strictEqual(await vscode.workspace.applyEdit(insert), true);
+		const deadline = Date.now() + 1000;
+		while (document.getText() !== '<div><p>Keep me</p></div>' && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+		assert.strictEqual(document.getText(), '<div><p>Keep me</p></div>');
+		const statistics = await vscode.commands.executeCommand<{ total: number }>('syntaxstitch.showStatistics');
+		assert.strictEqual(statistics.total, 0);
 	});
 
 	test('tabs from an inner closing tag to the next closing tag', async () => {
@@ -384,6 +487,32 @@ suite('Extension integration', () => {
 		assert.strictEqual(await run('syntaxstitch.togglePairFold'), true);
 		assert.strictEqual(document.offsetAt(editor.selection.active), content.indexOf('{'));
 		assert.strictEqual(await run('syntaxstitch.togglePairFold'), true);
+	});
+
+	test('shows labels for every multiline pair sharing a TSX closing line', async () => {
+		const content = `export function NestedList({ values }: { values: number[] }) {
+    return (
+        <ul>
+            {values.map(value => (
+                <li key={value}>{value}</li>
+            ))}
+        </ul>
+    );
+}`;
+		const document = await vscode.workspace.openTextDocument({ language: 'typescriptreact', content }), editor = await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>('vscode.executeInlayHintProvider', document.uri, new vscode.Range(document.positionAt(0), document.positionAt(content.length))), closers = content.indexOf('))}');
+		const positions = hints.map(hint => document.offsetAt(hint.position));
+		assert.ok(positions.includes(closers + 1), 'Expected a label after the callback body parenthesis');
+		assert.ok(positions.includes(closers + 2), 'Expected a label after the map call parenthesis');
+		assert.ok(positions.includes(closers + 3), 'Expected a label after the JSX expression brace');
+		const labelAt = (offset: number) => hints.find(hint => document.offsetAt(hint.position) === offset && Array.isArray(hint.label));
+		const grouped = labelAt(closers + 1)!, map = labelAt(closers + 2)!;
+		assert.ok(Array.isArray(grouped.label) && !grouped.label.some(part => part.value === 'map()'));
+		assert.ok(Array.isArray(map.label) && map.label.some(part => part.value === 'map()' || part.value.endsWith('.map')));
+		const target = map.label.find(part => part.command?.command === 'syntaxstitch.selectPairWithDeclaration')!.command!.arguments![0], mapOpen = content.indexOf('(', content.indexOf('values.map'));
+		assert.strictEqual(await vscode.commands.executeCommand<boolean>('syntaxstitch.selectPairWithDeclaration', target), true);
+		assert.strictEqual(document.getText(editor.selection), content.slice(mapOpen, closers + 2));
 	});
 
 	test('folds and unfolds collapsible contents without folding the owner block', async () => {
@@ -536,7 +665,7 @@ suite('Extension integration', () => {
 		assert.ok(!document.getText().includes('['));
 	});
 
-	test('heals an HTML opening tag deleted through WorkspaceEdit', async () => {
+	test('removes the matching closing tag after exact opening-tag deletion', async () => {
 		await vscode.commands.executeCommand('syntaxstitch.showOutput');
 		await vscode.commands.executeCommand('syntaxstitch.resetStatistics');
 		const opening = '<article data-syntaxstitch-target="html">', content = `<main>\n    ${opening}\n        <p>Content</p>\n    </article>\n</main>\n`;
@@ -546,8 +675,10 @@ suite('Extension integration', () => {
 		assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
 
 		const deadline = Date.now() + 2000;
-		while (!document.getText().includes(opening) && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
-		assert.ok(document.getText().includes(opening), 'SyntaxStitch did not restore the HTML opening tag');
+		while (document.getText().includes('</article>') && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+		assert.ok(!document.getText().includes(opening));
+		assert.ok(!document.getText().includes('</article>'), 'SyntaxStitch did not remove the matching HTML closing tag');
+		assert.ok(document.getText().includes('<p>Content</p>'));
 		const statistics = await vscode.commands.executeCommand<{ total: number; byKind: { tag: number } }>('syntaxstitch.showStatistics');
 		assert.strictEqual(statistics.total, 1);
 		assert.strictEqual(statistics.byKind.tag, 1);
