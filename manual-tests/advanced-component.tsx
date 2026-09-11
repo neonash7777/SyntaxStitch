@@ -24,7 +24,7 @@ export function NestedReport() {
             </header>
             <section>
                 {groups.map(({ name, values }) => (
-                    <article key={name} data-group={name}>
+                    <article key={name} data-group={name}>""
                         <h2>{name}</h2>
                         <ul>
                             {values.map(value => (

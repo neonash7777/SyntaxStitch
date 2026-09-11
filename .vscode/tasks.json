@@ -19,6 +19,22 @@
                 "panel": "dedicated"
             }
         },
+        {
+            "label": "test SyntaxStitch before publish",
+            "type": "npm",
+            "script": "test:publish",
+            "problemMatcher": [
+                "$tsc"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
 		{
             "label": "watch",
             "dependsOn": [
@@ -32,7 +48,7 @@
                 "kind": "build",
                 "isDefault": false
             }
-        },
+		},
         {
             "type": "npm",
             "script": "watch:esbuild",
@@ -56,7 +72,7 @@
                 "group": "watch",
                 "reveal": "never"
             }
-        },
+		},
 		{
 			"type": "npm",
 			"script": "watch-tests",

@@ -2,7 +2,7 @@
   "name": "syntaxstitch",
   "displayName": "SyntaxStitch",
   "description": "Stops mismatched brackets, quotes, tags, and indentation from turning AI edits into cascading syntax failures.",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "BrockNash",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -224,6 +224,11 @@
           "default": "repairs",
           "description": "Detail written to the SyntaxStitch output channel."
         },
+        "syntaxstitch.flashStatus": {
+          "type": "boolean",
+          "default": true,
+          "description": "Flash the SyntaxStitch status bar item when a repair is counted."
+        },
         "syntaxstitch.repairCountCooldownMs": {
           "type": "integer",
           "minimum": 0,
@@ -249,7 +254,11 @@
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test",
-    "test:minimum": "VSCODE_TEST_VERSION=1.127.0 vscode-test"
+    "test:minimum": "VSCODE_TEST_VERSION=1.127.0 vscode-test",
+    "test:unit": "npm run compile-tests && node --test out/test/*.unit.js",
+    "test:unit:focused": "npm run compile-tests && node --test --test-name-pattern=\"$TEST_PATTERN\" out/test/*.unit.js",
+    "test:unit:compiled": "node --test out/test/*.unit.js",
+    "test:publish": "npm run compile-tests && npm run package && npm run test:unit:compiled && VSCODE_TEST_VERSION=1.127.0 vscode-test"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

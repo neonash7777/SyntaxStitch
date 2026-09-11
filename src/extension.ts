@@ -3,7 +3,7 @@ import { ShadowStructure, type BlockType, type RepairKind, type RepairPatch, typ
 
 // region State
 type DocumentState = { shadow: ShadowStructure; languageId: string };
-export type RepairStatistics = { total: number; byKind: Record<RepairKind, number>; unclassified: number; lastAt?: string; lastUri?: string };
+export type RepairStatistics = { total: number; byKind: Record<RepairKind, number>; unclassified: number; lastAt?: string; lastUri?: string; lastRepair?: string };
 type LegacyRepairStatistics = { total: number; byType?: Partial<Record<BlockType, number>>; lastAt?: string; lastUri?: string };
 const states = new Map<string, DocumentState>();
 const repairing = new Set<string>();
@@ -35,12 +35,12 @@ class RepairCounter {
 		this.#store = vscode.workspace.workspaceFolders?.length ? context.workspaceState : context.globalState;
 		const stored = this.#store.get<RepairStatistics & LegacyRepairStatistics>(STATISTICS_KEY);
 		const byKind = stored?.byKind;
-		this.#statistics = { total: stored?.total ?? 0, byKind: { square: byKind?.square ?? 0, parenthesis: byKind?.parenthesis ?? 0, curly: byKind?.curly ?? 0, tag: byKind?.tag ?? stored?.byType?.tag ?? 0, quote: byKind?.quote ?? 0, indent: byKind?.indent ?? stored?.byType?.indent ?? 0 }, unclassified: stored?.unclassified ?? stored?.byType?.brace ?? 0, lastAt: stored?.lastAt, lastUri: stored?.lastUri };
+		this.#statistics = { total: stored?.total ?? 0, byKind: { square: byKind?.square ?? 0, parenthesis: byKind?.parenthesis ?? 0, curly: byKind?.curly ?? 0, tag: byKind?.tag ?? stored?.byType?.tag ?? 0, quote: byKind?.quote ?? 0, indent: byKind?.indent ?? stored?.byType?.indent ?? 0 }, unclassified: stored?.unclassified ?? stored?.byType?.brace ?? 0, lastAt: stored?.lastAt, lastUri: stored?.lastUri, lastRepair: stored?.lastRepair };
 	}
 
 	get statistics(): Readonly<RepairStatistics> { return this.#statistics; }
 
-	async record(patches: readonly RepairPatch[], uri: vscode.Uri): Promise<number> {
+	async record(patches: readonly RepairPatch[], uri: vscode.Uri, lastRepair: string): Promise<number> {
 		const now = Date.now(), cooldown = vscode.workspace.getConfiguration(CONFIG_SECTION, uri).get('repairCountCooldownMs', 5000);
 		const counted = patches.filter(patch => {
 			const key = `${uri}:${patch.pairId}:${patch.side}`, previous = this.#recent.get(key) ?? 0;
@@ -50,7 +50,7 @@ class RepairCounter {
 		if (!counted.length) { return 0; }
 		const byKind = { ...this.#statistics.byKind };
 		for (const patch of counted) { byKind[patch.kind]++; }
-		this.#statistics = { ...this.#statistics, total: this.#statistics.total + counted.length, byKind, lastAt: new Date().toISOString(), lastUri: uri.toString() };
+		this.#statistics = { ...this.#statistics, total: this.#statistics.total + counted.length, byKind, lastAt: new Date().toISOString(), lastUri: uri.toString(), lastRepair };
 		await this.#store.update(STATISTICS_KEY, this.#statistics);
 		return counted.length;
 	}
@@ -108,16 +108,37 @@ const planClosingIndentRepairs = (document: vscode.TextDocument, changes: readon
 	});
 };
 export const repairStatusPresentation = (statistics: Readonly<RepairStatistics>, enabled: boolean): { text: string; tooltip: string; accessibilityLabel: string } => {
-	const state = enabled ? 'enabled' : 'disabled', { total, byKind, unclassified } = statistics;
+	const state = enabled ? 'enabled' : 'disabled', { total, byKind, unclassified, lastRepair } = statistics;
 	const details = [`()  Parentheses: ${byKind.parenthesis}`, `[]  Square brackets: ${byKind.square}`, `{}  Curly braces: ${byKind.curly}`, `<>  Tags: ${byKind.tag}`, `""  Quotes: ${byKind.quote}`, `\\t  Indentation: ${byKind.indent}`];
 	if (unclassified) { details.push(`?  Legacy unclassified: ${unclassified}`); }
-	return { text: `{S} ${total}`, tooltip: `SyntaxStitch is ${state}.\n\n${total} repairs\n${details.join('\n')}\n\nClick for actions.`, accessibilityLabel: `SyntaxStitch is ${state} with ${total} repairs. Activate for actions.` };
+	return { text: `{S} ${total}`, tooltip: `SyntaxStitch is ${state}.\n\n${total} repairs\n${details.join('\n')}${lastRepair ? `\n\nLast repair\n${lastRepair}` : ''}\n\nClick for actions.`, accessibilityLabel: `SyntaxStitch is ${state} with ${total} repairs.${lastRepair ? ` Last repair: ${lastRepair}.` : ''} Activate for actions.` };
 };
+const STATUS_ACTIVITY_PREFIX = '$(sync~spin) ';
+export const animatedRepairStatusText = (text: string): string => `${STATUS_ACTIVITY_PREFIX}${text}`;
 const refreshStatus = (status: vscode.StatusBarItem, counter: RepairCounter): void => {
 	const presentation = repairStatusPresentation(counter.statistics, enabledSetting(vscode.window.activeTextEditor?.document.uri));
 	status.text = presentation.text;
 	status.tooltip = presentation.tooltip;
 	status.accessibilityInformation = { label: presentation.accessibilityLabel };
+};
+const repairDescription = (document: vscode.TextDocument, patches: readonly RepairPatch[], pairs: readonly TokenPair[]): string => {
+	const patch = patches[0], owner = pairs.find(pair => pair.id === patch.pairId), line = document.positionAt(Math.min(patch.offset, document.getText().length)).line + 1;
+	const action = patch.text && patch.deleteLength ? 'Replaced' : patch.text ? 'Restored' : 'Removed', token = patch.text || (patch.kind === 'indent' ? 'indentation' : owner ? `${owner.openToken}${owner.closeToken}` : patch.kind);
+	return `${action} ${JSON.stringify(token)} · ${owner?.languageId ?? document.languageId} · line ${line}${patches.length > 1 ? ` · ${patches.length} changes` : ''}`;
+};
+const statusFlashTimers = new WeakMap<vscode.StatusBarItem, ReturnType<typeof setTimeout>>();
+const flashStatus = (status: vscode.StatusBarItem): void => {
+	const previous = statusFlashTimers.get(status);
+	if (previous) { clearTimeout(previous); }
+	status.text = animatedRepairStatusText(status.text);
+	status.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+	status.color = new vscode.ThemeColor('statusBarItem.warningForeground');
+	statusFlashTimers.set(status, setTimeout(() => {
+		if (status.text.startsWith(STATUS_ACTIVITY_PREFIX)) { status.text = status.text.slice(STATUS_ACTIVITY_PREFIX.length); }
+		status.backgroundColor = undefined;
+		status.color = undefined;
+		statusFlashTimers.delete(status);
+	}, 500));
 };
 const log = (output: vscode.OutputChannel, uri: vscode.Uri | undefined, level: Exclude<LogLevel, 'off'>, record: object): void => {
 	const configured = vscode.workspace.getConfiguration(CONFIG_SECTION, uri).get<LogLevel>('logLevel', 'repairs');
@@ -235,15 +256,15 @@ const captureTagCaret = (event: vscode.TextDocumentChangeEvent): void => {
 // endregion
 
 // region Reconciliation
-type ProtectedCloserIntent = { deletion: DirectDeletion; pairId: string; blockType: BlockType; stepInside: boolean };
-const protectedCloserIntent = (event: vscode.TextDocumentChangeEvent, patches: readonly RepairPatch[]): ProtectedCloserIntent | undefined => {
+type ProtectedBoundaryIntent = { deletion: DirectDeletion; pairId: string; blockType: BlockType; side: 'open' | 'close' };
+const protectedBoundaryIntent = (event: vscode.TextDocumentChangeEvent, patches: readonly RepairPatch[]): ProtectedBoundaryIntent | undefined => {
 	const change = event.contentChanges[0], deletion = directDeletions.get(keyOf(event.document)), editor = deletion?.editor;
 	if (!editor || !deletion || editor.document !== event.document || event.contentChanges.length !== 1 || !change || change.text || change.rangeLength !== 1) { return undefined; }
 	const expectedOffset = deletion.direction === 'left' ? change.rangeOffset + change.rangeLength : change.rangeOffset;
 	if (deletion.offset !== expectedOffset) { return undefined; }
-	const patch = patches.find(candidate => candidate.text && (candidate.blockType === 'brace' || candidate.blockType === 'tag') && candidate.side === 'close');
+	const patch = patches.find(candidate => candidate.text && (candidate.blockType === 'brace' || candidate.blockType === 'tag' || candidate.blockType === 'quote') && (candidate.side === 'open' || candidate.side === 'close'));
 	if (patch) { directDeletions.delete(keyOf(event.document)); }
-	return patch ? { deletion, pairId: patch.pairId, blockType: patch.blockType, stepInside: patch.blockType === 'brace' && ')]}'.includes(event.document.getText()[change.rangeOffset - 1] ?? '') } : undefined;
+	return patch ? { deletion, pairId: patch.pairId, blockType: patch.blockType, side: patch.side } : undefined;
 };
 const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.OutputChannel, counter: RepairCounter, status: vscode.StatusBarItem): Promise<void> => {
 	const document = event.document, key = keyOf(document);
@@ -289,8 +310,8 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 	const structural = state.shadow.planRepairs(event.contentChanges, document.getText()).filter(patch => structures.includes(patch.blockType));
 	const plannedPatches = [...structural, ...planClosingIndentRepairs(document, event.contentChanges)].sort((left, right) => right.offset - left.offset);
 	if (!plannedPatches.length) { index(document); return; }
-	const closerIntent = protectedCloserIntent(event, plannedPatches), directChange = event.contentChanges[0];
-	const patches = closerIntent?.blockType === 'brace' && !closerIntent.stepInside ? plannedPatches.map(patch => patch.pairId === closerIntent.pairId ? { ...patch, offset: directChange.rangeOffset, deleteLength: 0, text: patch.text.at(-1) ?? patch.text } : patch) : plannedPatches;
+	const boundaryIntent = protectedBoundaryIntent(event, plannedPatches), directChange = event.contentChanges[0];
+	const patches = boundaryIntent?.blockType === 'brace' && boundaryIntent.side === 'close' ? plannedPatches.map(patch => patch.pairId === boundaryIntent.pairId ? { ...patch, offset: directChange.rangeOffset, deleteLength: 0, text: patch.text.at(-1) ?? patch.text } : patch) : plannedPatches;
 
 	const edit = new vscode.WorkspaceEdit();
 	for (const patch of patches) { edit.replace(document.uri, patchRange(document, patch), patch.text); }
@@ -299,8 +320,11 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 	try {
 		applied = await vscode.workspace.applyEdit(edit);
 		repairing.delete(key);
-		const countedRepairs = applied ? await counter.record(patches, document.uri) : 0;
-		if (countedRepairs) { refreshStatus(status, counter); }
+		const countedRepairs = applied ? await counter.record(patches, document.uri, repairDescription(document, patches, state.shadow.pairs)) : 0;
+		if (countedRepairs) {
+			refreshStatus(status, counter);
+			if (vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri).get('flashStatus', true)) { flashStatus(status); }
+		}
 		log(output, document.uri, 'repairs', { type: 'syntaxstitch/reconciled', uri: document.uri.toString(), version: document.version, applied, countedRepairs, suppressedRepeats: applied ? patches.length - countedRepairs : 0, repairs: patches });
 		if (!applied) { log(output, document.uri, 'repairs', { type: 'syntaxstitch/error', uri: document.uri.toString(), reason: 'workspace-edit-rejected' }); }
 	} catch (error) {
@@ -308,11 +332,9 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 	} finally {
 		repairing.delete(key);
 		index(document);
-		const shadow = states.get(key)?.shadow, restored = applied && closerIntent ? shadow?.pairs.find(pair => pair.id === closerIntent.pairId) : undefined;
-		if (restored && closerIntent) {
-			const span = shadow?.selectionSpan(restored.closeIdx), cursor = document.positionAt(restored.closeIdx);
-			const selection = closerIntent.stepInside ? new vscode.Selection(cursor, cursor) : span ? new vscode.Selection(document.positionAt(span.start), document.positionAt(span.end)) : undefined;
-			if (selection) { closerIntent.deletion.selection = selection; }
+		const shadow = states.get(key)?.shadow, restored = applied && boundaryIntent ? shadow?.pairs.find(pair => pair.id === boundaryIntent.pairId) : undefined;
+		if (restored && boundaryIntent) {
+			boundaryIntent.deletion.selection = new vscode.Selection(document.positionAt(restored.openIdx), document.positionAt(restored.closeIdx + restored.closeToken.length));
 		}
 	}
 };
@@ -415,10 +437,23 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!editor || !isEnabled(editor.document) || editor.selections.length !== 1 || !editor.selection.isEmpty) { return vscode.commands.executeCommand(command); }
 			const offset = editor.document.offsetAt(editor.selection.active);
 			if ((direction === 'left' && offset === 0) || (direction === 'right' && offset === editor.document.getText().length)) { return vscode.commands.executeCommand(command); }
+			index(editor.document);
+			const target = direction === 'left' ? offset - 1 : offset, text = editor.document.getText(), whitespaceQuote = states.get(keyOf(editor.document))?.shadow.pairs.find(pair => pair.type === 'quote' && pair.closeIdx <= target && target < pair.closeIdx + pair.closeToken.length && !text.slice(pair.openIdx + pair.openToken.length, pair.closeIdx).trim());
+			if (whitespaceQuote) {
+				editor.selection = new vscode.Selection(editor.document.positionAt(whitespaceQuote.openIdx), editor.document.positionAt(whitespaceQuote.closeIdx + whitespaceQuote.closeToken.length));
+				return;
+			}
 			let complete!: () => void;
-			const completed = new Promise<void>(resolve => { complete = resolve; }), deletion: DirectDeletion = { editor, direction, offset, completed, complete };
+			const completed = new Promise<void>(resolve => { complete = resolve; }), version = editor.document.version, deletion: DirectDeletion = { editor, direction, offset, completed, complete };
 			directDeletions.set(keyOf(editor.document), deletion);
-			await vscode.commands.executeCommand(command);
+			try {
+				await vscode.commands.executeCommand(command);
+			} finally {
+				if (editor.document.version === version && directDeletions.get(keyOf(editor.document)) === deletion) {
+					directDeletions.delete(keyOf(editor.document));
+					complete();
+				}
+			}
 			await completed;
 			if (deletion.selection) { editor.selection = deletion.selection; }
 		})),

@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { repairStatusPresentation } from '../extension';
+import { animatedRepairStatusText, repairStatusPresentation } from '../extension';
 import { ShadowStructure } from '../shadowStructure';
 
 const change = (text: string, start: number, length: number, replacement = ''): vscode.TextDocumentContentChangeEvent => ({
@@ -21,11 +21,14 @@ const maximumPairDepth = (shadow: ShadowStructure): number => Math.max(...shadow
 
 suite('Status presentation', () => {
 	test('keeps the tray compact and puts symbol counts in the tooltip', () => {
-		const presentation = repairStatusPresentation({ total: 1234, byKind: { square: 2, parenthesis: 3, curly: 5, tag: 7, quote: 11, indent: 13 }, unclassified: 0 }, true);
+		const presentation = repairStatusPresentation({ total: 1234, byKind: { square: 2, parenthesis: 3, curly: 5, tag: 7, quote: 11, indent: 13 }, unclassified: 0, lastRepair: 'Restored "}" · typescript · line 42' }, true);
 		assert.strictEqual(presentation.text, '{S} 1234');
 		for (const detail of ['()  Parentheses: 3', '[]  Square brackets: 2', '{}  Curly braces: 5', '<>  Tags: 7', '""  Quotes: 11', '\\t  Indentation: 13']) { assert.ok(presentation.tooltip.includes(detail)); }
 		assert.ok(presentation.tooltip.startsWith('SyntaxStitch is enabled.'));
 		assert.ok(presentation.tooltip.includes('1234 repairs\n()') && !presentation.tooltip.includes('1234 repairs\n\n'));
+		assert.ok(presentation.tooltip.includes('Last repair\nRestored "}" · typescript · line 42'));
+		assert.ok(presentation.accessibilityLabel.includes('Last repair: Restored "}" · typescript · line 42.'));
+		assert.strictEqual(animatedRepairStatusText(presentation.text), '$(sync~spin) {S} 1234');
 	});
 });
 
@@ -109,6 +112,13 @@ suite('ShadowStructure', () => {
 		assert.strictEqual(quote?.closeIdx, text.lastIndexOf('"'));
 		assert.strictEqual(shadow.pairs.filter(pair => pair.type === 'brace').length, 1);
 		assert.ok(!shadow.pairs.some(pair => pair.type === 'tag'));
+	});
+
+	test('does not pair a stray quote with a string on a later line', () => {
+		const text = 'type Group = {\n    name: string;\n    values: number[];\n};"\nconst name = "primary";', shadow = new ShadowStructure(text, 'typescript');
+		const quotes = shadow.pairs.filter(pair => pair.type === 'quote');
+		assert.strictEqual(quotes.length, 1);
+		assert.strictEqual(text.slice(quotes[0].openIdx, quotes[0].closeIdx + 1), '"primary"');
 	});
 
 	test('pairs attribute and triple quotes and repairs a deleted quote', () => {
@@ -259,6 +269,15 @@ suite('ShadowStructure', () => {
 });
 
 suite('Extension integration', () => {
+	const deleteLeft = async (): Promise<void> => {
+		await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+		await vscode.commands.executeCommand('syntaxstitch.deleteLeft');
+	};
+	const deleteRight = async (): Promise<void> => {
+		await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+		await vscode.commands.executeCommand('syntaxstitch.deleteRight');
+	};
+
 	suiteSetup(async () => {
 		const extension = vscode.extensions.all.find(candidate => candidate.packageJSON.name === 'syntaxstitch');
 		assert.ok(extension, 'SyntaxStitch development extension was not loaded');
@@ -281,29 +300,19 @@ suite('Extension integration', () => {
 		}
 	});
 
-	test('steps inside adjacent closers then selects the inner pair on deletion', async function () {
+	test('selects the complete pair when restoring an adjacent closer', async function () {
 		this.timeout(5000);
 		const content = 'console.log(add(x, y))', document = await vscode.workspace.openTextDocument({ language: 'javascript', content });
-		const editor = await vscode.window.showTextDocument(document), deleteLeft = async (): Promise<void> => {
-			await vscode.commands.executeCommand('syntaxstitch.deleteLeft');
-			const deadline = Date.now() + 1000;
-			while (document.getText() !== content && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
-			assert.strictEqual(document.getText(), content);
-		};
+		const editor = await vscode.window.showTextDocument(document);
 		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
 
 		const outerClose = content.lastIndexOf(')');
 		editor.selection = new vscode.Selection(document.positionAt(outerClose + 1), document.positionAt(outerClose + 1));
 		await deleteLeft();
-		const cursorDeadline = Date.now() + 1000;
-		while (document.offsetAt(editor.selection.active) !== outerClose && Date.now() < cursorDeadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
-		assert.ok(editor.selection.isEmpty);
-		assert.strictEqual(document.offsetAt(editor.selection.active), outerClose);
-
-		await deleteLeft();
-		const selectionDeadline = Date.now() + 1000;
-		while (editor.selection.isEmpty && Date.now() < selectionDeadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
-		assert.strictEqual(document.getText(editor.selection), '(x, y)');
+		const deadline = Date.now() + 1000;
+		while ((document.getText() !== content || editor.selection.isEmpty) && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+		assert.strictEqual(document.getText(), content);
+		assert.strictEqual(document.getText(editor.selection), '(add(x, y))');
 	});
 
 	test('unwraps standalone grouping parentheses with direct Backspace', async () => {
@@ -311,7 +320,7 @@ suite('Extension integration', () => {
 		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
 		const end = document.positionAt(document.getText().length);
 		editor.selection = new vscode.Selection(end, end);
-		await vscode.commands.executeCommand('syntaxstitch.deleteLeft');
+		await deleteLeft();
 		const deadline = Date.now() + 1000;
 		while (document.getText() !== 'cat' && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
 		assert.strictEqual(document.getText(), 'cat');
@@ -327,11 +336,83 @@ suite('Extension integration', () => {
 		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
 		editor.selection = new vscode.Selection(document.positionAt(close + 1), document.positionAt(close + 1));
 
-		await vscode.commands.executeCommand('syntaxstitch.deleteLeft');
+		await deleteLeft();
 		const deadline = Date.now() + 1000;
 		while ((document.getText() !== content || editor.selection.isEmpty) && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
 		assert.strictEqual(document.getText(), content);
 		assert.strictEqual(document.getText(editor.selection), content.slice(content.lastIndexOf('{'), close + 1));
+	});
+
+	test('selects each meaningful bracket pair when its closer is directly deleted', async function () {
+		this.timeout(5000);
+		const cases: readonly (readonly [string, string, string])[] = [['call(value)', '(value)', ')'], ['const values = [1, 2];', '[1, 2]', ']'], ['const value = { nested: true };', '{ nested: true }', '}']];
+		for (const [content, expected, closer] of cases) {
+			const language = content.startsWith('call') ? 'javascript' : 'typescript', document = await vscode.workspace.openTextDocument({ language, content });
+			const editor = await vscode.window.showTextDocument(document), close = content.lastIndexOf(closer);
+			await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+			editor.selection = new vscode.Selection(document.positionAt(close + 1), document.positionAt(close + 1));
+			await deleteLeft();
+			const deadline = Date.now() + 1000;
+			while ((document.getText() !== content || editor.selection.isEmpty) && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+			assert.strictEqual(document.getText(), content);
+			assert.strictEqual(document.getText(editor.selection), expected);
+		}
+	});
+
+	test('selects each meaningful bracket pair when its opener is directly deleted', async function () {
+		this.timeout(5000);
+		const cases: readonly (readonly [string, string, string])[] = [['call(value)', '(value)', '('], ['const values = [1, 2];', '[1, 2]', '['], ['const value = { nested: true };', '{ nested: true }', '{']];
+		for (const [content, expected, opener] of cases) {
+			const language = content.startsWith('call') ? 'javascript' : 'typescript', document = await vscode.workspace.openTextDocument({ language, content });
+			const editor = await vscode.window.showTextDocument(document), open = content.indexOf(opener);
+			await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+			editor.selection = new vscode.Selection(document.positionAt(open), document.positionAt(open));
+			await deleteRight();
+			const deadline = Date.now() + 1000;
+			while ((document.getText() !== content || editor.selection.isEmpty) && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+			assert.strictEqual(document.getText(), content);
+			assert.strictEqual(document.getText(editor.selection), expected);
+		}
+	});
+
+	test('restores a directly deleted closing quote and selects the string', async function () {
+		this.timeout(5000);
+		const content = 'const value = "test";', document = await vscode.workspace.openTextDocument({ language: 'typescript', content });
+		const editor = await vscode.window.showTextDocument(document), close = content.lastIndexOf('"');
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		editor.selection = new vscode.Selection(document.positionAt(close + 1), document.positionAt(close + 1));
+
+		await deleteLeft();
+		const deadline = Date.now() + 1000;
+		while ((document.getText() !== content || editor.selection.isEmpty) && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+		assert.strictEqual(document.getText(), content);
+		assert.strictEqual(document.getText(editor.selection), '"test"');
+	});
+
+	test('selects a whitespace-only quote pair before direct closer deletion', async function () {
+		this.timeout(5000);
+		const content = 'const values = "}"; " ";', document = await vscode.workspace.openTextDocument({ language: 'typescript', content });
+		const editor = await vscode.window.showTextDocument(document), open = content.lastIndexOf('"', content.lastIndexOf('"') - 1), close = content.lastIndexOf('"'), pairSelection = () => new vscode.Selection(document.positionAt(open), document.positionAt(close + 1));
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		editor.selection = new vscode.Selection(document.positionAt(close + 1), document.positionAt(close + 1));
+
+		await deleteLeft();
+		assert.strictEqual(document.getText(), content);
+		assert.strictEqual(document.getText(editor.selection), '" "');
+
+		await vscode.commands.executeCommand('cursorLeft');
+		assert.strictEqual(document.offsetAt(editor.selection.active), open);
+		editor.selection = pairSelection();
+		await vscode.commands.executeCommand('cursorRight');
+		assert.strictEqual(document.offsetAt(editor.selection.active), close + 1);
+
+		editor.selection = new vscode.Selection(document.positionAt(close), document.positionAt(close));
+		await deleteRight();
+		assert.strictEqual(document.getText(editor.selection), '" "');
+		await deleteLeft();
+		const deadline = Date.now() + 1000, expected = 'const values = "}"; ;';
+		while (document.getText() !== expected && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+		assert.strictEqual(document.getText(), expected);
 	});
 
 	test('restores a partially deleted closing tag once and selects its full element', async function () {
@@ -341,7 +422,7 @@ suite('Extension integration', () => {
 		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
 		editor.selection = new vscode.Selection(document.positionAt(closeEnd), document.positionAt(closeEnd));
 
-		await vscode.commands.executeCommand('syntaxstitch.deleteLeft');
+		await deleteLeft();
 		const deadline = Date.now() + 1000;
 		while ((document.getText() !== content || editor.selection.isEmpty) && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
 		assert.strictEqual(document.getText(), content);
@@ -372,6 +453,36 @@ suite('Extension integration', () => {
 		const deadline = Date.now() + 1000;
 		while (document.getText() !== '<div><p>Keep me</p></div>' && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
 		assert.strictEqual(document.getText(), '<div><p>Keep me</p></div>');
+		const statistics = await vscode.commands.executeCommand<{ total: number }>('syntaxstitch.showStatistics');
+		assert.strictEqual(statistics.total, 0);
+	});
+
+	test('synchronizes the opening tag when a closing tag name changes', async function () {
+		await vscode.commands.executeCommand('syntaxstitch.resetStatistics');
+		const content = '<section>Keep me</section>', document = await vscode.workspace.openTextDocument({ language: 'html', content }), nameStart = content.lastIndexOf('section');
+		await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const edit = new vscode.WorkspaceEdit();
+		edit.replace(document.uri, new vscode.Range(document.positionAt(nameStart), document.positionAt(nameStart + 'section'.length)), 'div');
+		assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+		const deadline = Date.now() + 1000;
+		while (document.getText() !== '<div>Keep me</div>' && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+		assert.strictEqual(document.getText(), '<div>Keep me</div>');
+		const statistics = await vscode.commands.executeCommand<{ total: number }>('syntaxstitch.showStatistics');
+		assert.strictEqual(statistics.total, 0);
+	});
+
+	test('synchronizes nested tag names while preserving opening attributes', async function () {
+		await vscode.commands.executeCommand('syntaxstitch.resetStatistics');
+		const content = '<section data-kind="report"><article><p>Keep me</p></article></section>', document = await vscode.workspace.openTextDocument({ language: 'html', content }), nameStart = content.lastIndexOf('section');
+		await vscode.window.showTextDocument(document);
+		await vscode.commands.executeCommand('syntaxstitch.rebuildShadowIndex');
+		const edit = new vscode.WorkspaceEdit();
+		edit.replace(document.uri, new vscode.Range(document.positionAt(nameStart), document.positionAt(nameStart + 'section'.length)), 'div');
+		assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+		const deadline = Date.now() + 1000;
+		while (document.getText() !== '<div data-kind="report"><article><p>Keep me</p></article></div>' && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
+		assert.strictEqual(document.getText(), '<div data-kind="report"><article><p>Keep me</p></article></div>');
 		const statistics = await vscode.commands.executeCommand<{ total: number }>('syntaxstitch.showStatistics');
 		assert.strictEqual(statistics.total, 0);
 	});
@@ -716,8 +827,9 @@ suite('Extension integration', () => {
 			while (!document.getText().includes(')') && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); }
 			assert.ok(document.getText().includes(')'));
 		}
-		const statistics = await vscode.commands.executeCommand<{ total: number; byKind: { parenthesis: number } }>('syntaxstitch.showStatistics');
+		const statistics = await vscode.commands.executeCommand<{ total: number; byKind: { parenthesis: number }; lastRepair?: string }>('syntaxstitch.showStatistics');
 		assert.strictEqual(statistics.total, 1);
 		assert.strictEqual(statistics.byKind.parenthesis, 1);
+		assert.strictEqual(statistics.lastRepair, 'Restored ")" · javascript · line 1');
 	});
 });

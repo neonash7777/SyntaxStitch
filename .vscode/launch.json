@@ -2,6 +2,20 @@
 	"version": "0.2.0",
 	"configurations": [
 		{
+			"name": "Run SyntaxStitch: Manual Test Lab (No Debugger)",
+			"type": "extensionHost",
+			"request": "launch",
+			"noDebug": true,
+			"args": [
+				"--extensionDevelopmentPath=${workspaceFolder}",
+				"${workspaceFolder}/manual-tests"
+			],
+			"outFiles": [
+				"${workspaceFolder}/dist/**/*.js"
+			],
+			"preLaunchTask": "build SyntaxStitch"
+		},
+		{
 			"name": "Run SyntaxStitch Extension",
 			"type": "extensionHost",
 			"request": "launch",
@@ -15,18 +29,16 @@
 			"preLaunchTask": "build SyntaxStitch"
 		},
 		{
-			"name": "Run SyntaxStitch: Manual Test Lab (No Debugger)",
-			"type": "extensionHost",
+			"name": "Run SyntaxStitch Automated Tests",
+			"type": "node",
 			"request": "launch",
-			"noDebug": true,
-			"args": [
-				"--extensionDevelopmentPath=${workspaceFolder}",
-				"${workspaceFolder}/manual-tests"
+			"runtimeExecutable": "npm",
+			"runtimeArgs": [
+				"run",
+				"test:publish"
 			],
-			"outFiles": [
-				"${workspaceFolder}/dist/**/*.js"
-			],
-			"preLaunchTask": "build SyntaxStitch"
+			"console": "integratedTerminal",
+			"internalConsoleOptions": "neverOpen"
 		}
 	]
 }

@@ -46,6 +46,8 @@ It is a guardrail, not a formatter or compiler replacement. Your existing langua
 
 SyntaxStitch distinguishes an accidental one-sided edit from a deliberate structural edit. It uses the indexed pair, the resulting document, the edit shape, and direct keyboard intent rather than blindly replacing every missing token.
 
+See [BEHAVIOR.md](BEHAVIOR.md) for the complete decision catalog, exceptions, test coverage, and the not-yet-implemented design for rule-specific controls.
+
 | Edit | Response | Why |
 | --- | --- | --- |
 | Delete one side of a whitespace-only `()`, `[]`, `{}`, quote, or paired tag | Remove the surviving boundary and interior whitespace. | An empty pair behaves as one unit, so restoring half of it would interfere with ordinary cleanup. |
@@ -53,12 +55,12 @@ SyntaxStitch distinguishes an accidental one-sided edit from a deliberate struct
 | Delete either boundary of standalone grouping parentheses such as `(cat)` | Remove its indexed counterpart and preserve `cat`. | A same-line grouping edit is explicit intent to unwrap the expression; call arguments remain protected. |
 | Replace an opening or closing tag name, including delete-then-type editing | Apply the same name to its indexed counterpart. | Ordinary `<section>` to `<div>` editing should remain fluid without creating a mismatched closing tag. |
 | Delete one side of a brace, call parenthesis, bracket, or quote containing code, comments, or text | Restore the missing boundary. | Meaningful content still needs its structural owner. Comments count as meaningful content. |
-| Backspace/Delete a meaningful closing boundary directly | Restore it and select the complete pair, such as `{ ... }`, `(x, y)`, or `<p>...</p>`. | Selecting the restored structure makes the repair visible and gives the next edit an explicit target. |
+| Backspace/Delete a meaningful boundary directly | Restore it and select the complete pair, such as `{ ... }`, `(x, y)`, or `<p>...</p>`. | Selecting the restored structure makes the repair visible and gives the next edit an explicit target. |
 | Delete part of a multi-character boundary such as the `>` in `</p>` | Replace the surviving `</p` fragment with exactly one complete `</p>`. | Replacing the damaged token in place avoids duplicating a full tag behind its surviving fragment. |
 | An HTML provider inserts adjacent `<p></p>` and leaves the cursor after `</p>` | Move the cursor between `<p>` and `</p>`. | The provider generates the tags; SyntaxStitch only corrects the temporary caret position so typing can continue inside the element. |
 | Press Tab immediately before an indexed closing tag | Jump to the next closing tag, such as from `</h1>` to `</p>`. | Closing tags form a useful outward path through nested markup. |
 | Press Tab immediately before a correctly indented line-leading `}` | Jump just past the `}`. | The block is already aligned, so adding more indentation is less useful than crossing its structural boundary. A misindented `}` keeps normal Tab behavior. |
-| Backspace/Delete the outer boundary in adjacent closers such as `add(x))` | Restore it and move the caret one boundary inward. | Stepping inward avoids trapping the caret outside a nested closer chain. Reaching a meaningful inner pair selects that pair. |
+| Backspace/Delete a meaningful closing boundary, including one among adjacent closers such as `add(x))` | Restore it and select its complete pair. | The next Delete removes the selected structure, while an arrow key collapses the selection to either boundary for editing its contents. |
 | Repeatedly delete nested empty pairs | Remove one layer per attempt and leave the caret at the next boundary. | Removing one layer at a time keeps the behavior predictable without collapsing unrelated nesting. |
 | Select and remove both boundaries together | Allow the edit. | A complete-pair edit is explicit intent to remove or unwrap that structure. |
 | Paste, AI, or multi-cursor edit both boundaries together | Allow the coordinated edit. | Changing both boundaries in one operation signals deliberate intent, so SyntaxStitch preserves the edit as a whole. |
@@ -116,21 +118,25 @@ If SyntaxStitch saves you time, you can support its development:
 - `syntaxstitch.languages` limits monitoring to selected VS Code language identifiers. Set it to `[]` to monitor every language.
 - `syntaxstitch.maxFileSizeKB` skips large documents. The default is 2048 KB.
 - `syntaxstitch.logLevel` controls structured output with `off`, `repairs`, or `verbose`.
+- `syntaxstitch.flashStatus` controls the 500 ms status-bar flash after a counted repair. It defaults to `true`; set it to `false` to keep the status item quiet.
 - `syntaxstitch.repairCountCooldownMs` prevents immediate retries on the same boundary from inflating statistics. It defaults to 5000 ms; use `0` to count every application.
 
 ## Development
 
 ```sh
 npm run compile
+npm run test:unit
 npm test
 ```
+
+Use **Tasks: Run Test Task** for the one-click pre-publish check. It packages the extension, runs the fast decision matrix, and runs the extension-host suite against the minimum supported VS Code version. During development, run only new unit scenarios by name, for example `TEST_PATTERN=quote npm run test:unit:focused`.
 
 Open **Run and Debug** and use the green Run button with either persistent launch action:
 
 - **Run SyntaxStitch Extension** opens this project in an Extension Development Host.
-- **Run SyntaxStitch: Manual Test Lab (No Debugger)** opens the fixture folder ready for fault injection without attaching Node's inspector.
+- **Run SyntaxStitch Automated Tests** packages the extension, runs the fast unit matrix, and runs the extension-host suite against the minimum supported VS Code version.
 
-The host remains open until you stop debugging. `npm test` is intentionally different: it runs automated tests in a disposable host and closes it when they finish.
+The development host remains open until you stop debugging. Automated tests run in a disposable host and close it when they finish.
 
 For an AI-driven fault-injection walkthrough covering HTML, JavaScript, Python, and C#, see [manual-tests/AI_TEST_PROMPT.md](manual-tests/AI_TEST_PROMPT.md).
 

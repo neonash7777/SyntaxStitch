@@ -68,9 +68,16 @@ const addTag = (tag: TagToken, stack: TagOpen[], pairs: PendingPair[], languageI
 
 const scanString = (text: string, openIdx: number, end: number, languageId: string, pairs: PendingPair[]): number => {
 	const character = text[openIdx], token = (languageId === 'python' || languageId === 'csharp') && text.startsWith(character.repeat(3), openIdx) ? character.repeat(3) : character;
+	const multiline = token.length > 1 || (languageId === 'csharp' && text[openIdx - 1] === '@');
 	for (let idx = openIdx + token.length, escaped = false; idx < end; idx++) {
 		const char = text[idx];
 		if (!escaped && text.startsWith(token, idx)) { pairs.push(pair(openIdx, idx, 'quote', token, token, languageId)); return idx + token.length - 1; }
+		if (!multiline && (char === '\r' || char === '\n')) {
+			if (!escaped) { return idx - 1; }
+			if (char === '\r' && text[idx + 1] === '\n') { idx++; }
+			escaped = false;
+			continue;
+		}
 		escaped = !escaped && char === '\\';
 		if (char !== '\\') { escaped = false; }
 	}

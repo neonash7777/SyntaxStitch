@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## Unreleased
 
+## 0.0.5 - 2026-09-11
+
+### Added
+
+- Restore and select the complete pair when Backspace or Delete removes one meaningful opening or closing boundary.
+- Synchronize nested HTML tag names while preserving opening-tag attributes.
+- Add `syntaxstitch.flashStatus` to disable the 500 ms status-bar flash after counted repairs.
+
 ## 0.0.4 - 2026-08-31
 
 ### Changed
