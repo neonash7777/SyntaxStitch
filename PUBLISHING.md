@@ -30,4 +30,11 @@ The workflow can also be run manually. Leave **Publish to the VS Code Marketplac
 npm run package:vsix
 ```
 
+Current release artifact:
+
+- File: `syntaxstitch-0.0.7.vsix`
+- SHA256: `0bf0e26cf53d54bff2e97a5d0fa548e81cf8bae755ac83c8150590e6bb8ebc0e`
+
+This checksum can be used to verify the packaged extension before installation or distribution.
+
 The checked-in publisher ID is `BrockNash`. GitHub Actions validates and applies `VSCE_PUBLISHER` before packaging or publishing.
