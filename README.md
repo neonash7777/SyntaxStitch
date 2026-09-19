@@ -6,11 +6,11 @@
 
 Cross-platform: works in VS Code on Windows, macOS, and Linux.
 
-SyntaxStitch watches structural edits and repairs orphaned brackets, quotes, tags, and Python indentation before one missing boundary turns the rest of the file into syntax-error confetti. It works with AI edits, paste replacements, multi-cursor changes, and ordinary typing—helping you recover faster and avoid the extra prompt cycles and token burn caused by broken code.
+SyntaxStitch is a structural safety net for modern coding. When an AI edit, paste, multi-cursor change, or quick typo removes one half of a pair, it restores the missing boundary before the rest of the file collapses into syntax errors and wasted prompt cycles.
 
-With **[Nested Select](#nested-select)**, highlight a region, step into its structures and properties, and edit matching HTML attribute values from the keyboard. Move up to the parent or across to the next element without rebuilding your selection. See the [full guide](#nested-select) below.
+It is built for the way code gets edited today: fast, imperfect, and often AI-assisted. Instead of forcing you to repair the damage by hand, SyntaxStitch keeps the buffer coherent and lets you keep moving.
 
-Behind the scenes, SyntaxStitch maintains a UUID-backed shadow index of paired boundaries. If an edit destroys one side, SyntaxStitch checks whether the surviving side now matches another boundary. It repairs only genuinely orphaned structures.
+With **[Nested Select](#nested-select)**, highlight a region, step through its structures and properties, and edit matching HTML attribute values from the keyboard without rebuilding the selection. It turns structural navigation into a fast, precise editing workflow instead of a tedious selection chore.
 
 No cloud service. No source upload. No setup required.
 
