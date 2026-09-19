@@ -2,15 +2,15 @@
 
 <p align="center"><img src="media/icon.png" width="128" height="128" alt="SyntaxStitch logo: a neon stitched S between colorful code braces"></p>
 
-**Keep your code together—and move through it with ease. SyntaxStitch repairs AI-induced syntax breakage, reduces token churn from failed edits, and adds Nested Select for structured keyboard navigation and edits.**
+**Keep your code together. SyntaxStitch repairs broken brackets, quotes, tags, and indentation before AI edits, paste actions, or quick keystrokes cascade into syntax errors.**
 
 Cross-platform: works in VS Code on Windows, macOS, and Linux.
 
-SyntaxStitch is a structural safety net for modern coding. When an AI edit, paste, multi-cursor change, or quick typo removes one half of a pair, it restores the missing boundary before the rest of the file collapses into syntax errors and wasted prompt cycles.
+SyntaxStitch is a structural safety net for modern coding. When an edit removes one half of a matching pair, it restores the missing boundary instead of leaving you with malformed code and wasted prompt cycles.
 
-It is built for the way code gets edited today: fast, imperfect, and often AI-assisted. Instead of forcing you to repair the damage by hand, SyntaxStitch keeps the buffer coherent and lets you keep moving.
+It is designed for the way code gets edited today: fast, imperfect, and often AI-assisted. Instead of forcing you to clean up the damage by hand, SyntaxStitch keeps the buffer coherent and helps you stay in flow.
 
-With **[Nested Select](#nested-select)**, highlight a region, step through its structures and properties, and edit matching HTML attribute values from the keyboard without rebuilding the selection. It turns structural navigation into a fast, precise editing workflow instead of a tedious selection chore.
+With **[Nested Select](#nested-select)**, highlight a region, move through its structures and properties, and edit matching HTML attribute values from the keyboard without rebuilding the selection. It turns structural navigation into a faster, more precise editing workflow.
 
 No cloud service. No source upload. No setup required.
 

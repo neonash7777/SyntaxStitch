@@ -1,8 +1,8 @@
 {
   "name": "syntaxstitch",
   "displayName": "SyntaxStitch",
-  "description": "Cross-platform for VS Code on Windows, macOS, and Linux. Repairs broken brackets, quotes, tags, and indentation caused by AI edits before they cascade into syntax errors.",
-  "version": "0.0.6",
+  "description": "Cross-platform support for VS Code on Windows, macOS, and Linux. Prevents broken brackets, quotes, tags, and indentation from turning AI edits into syntax errors.",
+  "version": "0.0.7",
   "publisher": "BrockNash",
   "icon": "media/icon.png",
   "license": "MIT",
