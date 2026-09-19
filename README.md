@@ -4,6 +4,8 @@
 
 **Keep your code together—and move through it with ease. SyntaxStitch repairs AI-induced syntax breakage, reduces token churn from failed edits, and adds Nested Select for structured keyboard navigation and edits.**
 
+Cross-platform: works in VS Code on Windows, macOS, and Linux.
+
 SyntaxStitch watches structural edits and repairs orphaned brackets, quotes, tags, and Python indentation before one missing boundary turns the rest of the file into syntax-error confetti. It works with AI edits, paste replacements, multi-cursor changes, and ordinary typing—helping you recover faster and avoid the extra prompt cycles and token burn caused by broken code.
 
 With **[Nested Select](#nested-select)**, highlight a region, step into its structures and properties, and edit matching HTML attribute values from the keyboard. Move up to the parent or across to the next element without rebuilding your selection. See the [full guide](#nested-select) below.
@@ -165,7 +167,7 @@ Automatic repairs require an open editor tab. Closing the tab cancels queued att
 
 Install **SyntaxStitch** from the VS Code Marketplace, or download the `.vsix` attached to a [GitHub Release](https://github.com/neonash7777/SyntaxStitch/releases) and run **Extensions: Install from VSIX...**.
 
-SyntaxStitch requires VS Code 1.127.0 or later.
+SyntaxStitch is cross-platform and works in VS Code on Windows, macOS, and Linux. It requires VS Code 1.127.0 or later.
 
 ## Support SyntaxStitch
 
