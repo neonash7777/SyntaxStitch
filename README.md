@@ -2,7 +2,7 @@
 
 <p align="center"><img src="media/icon.png" width="128" height="128" alt="SyntaxStitch logo: a neon stitched S between colorful code braces"></p>
 
-**Keep your code together. SyntaxStitch repairs broken brackets, quotes, tags, and indentation before AI edits, paste actions, or quick keystrokes cascade into syntax errors—and adds Nested Select for faster structured editing.**
+**Keep your code together. SyntaxStitch stops mismatched brackets, quotes, tags, and indentation from turning AI edits into cascading syntax failures—and adds Nested Select for faster structured editing.**
 
 Cross-platform: works in VS Code on Windows, macOS, and Linux.
 
