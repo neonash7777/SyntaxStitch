@@ -10,6 +10,9 @@ This document records the user intent behind each reconciliation decision. It is
 | A repeated repair is suppressed by the count cooldown | Apply the repair without changing the latest-repair summary or flashing. | Repeated attempts at one boundary are one incident, so repeated visual feedback would be noisy. |
 | The user opens the status hover | Show aggregate counts and the latest action, token, owning language, and line. | This gives enough context to evaluate the decision without logging source contents. |
 | The user clicks the status item | Open the existing action menu, including the global enable/disable action. | Global control remains easy to discover while detailed rule controls are still being designed. |
+| A repair is triggered by recognized direct Backspace/Delete while the document is open, visible, and the window is focused | Count it as `direct`. | These combined signals are the strongest available evidence of an active user edit. | If any signal is false, count it as `indirect`. |
+| A repair is triggered by any other document change | Count it as `indirect`. | VS Code does not expose whether the source was Copilot, paste, another extension, or a workspace edit. | It must not be labeled specifically as Copilot. |
+| A repair is recorded | Include whether the document is open, visible in an editor, and whether the VS Code window is focused in the reconciliation log. | These signals help investigate background edits without pretending they identify the edit source. | They do not change the `user` versus `external/unknown` classification. |
 
 ## Structural Decisions
 
@@ -22,6 +25,8 @@ This document records the user intent behind each reconciliation decision. It is
 | Replace both boundaries with another pair type | Keep the replacement. | The resulting structure is already balanced. | None. |
 | Delete standalone grouping parentheses around content | Remove the counterpart and keep the content. | Grouping parentheses are commonly removed deliberately. | Call parentheses remain protected because they express invocation. |
 | Delete a closer when another unmatched closer can take its place | Rebind only if pair count and language ownership remain stable. | This permits cleanup of redundant closers without stealing one from an outer structure. | Cross-language rebinding is never allowed. |
+| Insert a mismatched closing `)`, `]`, or `}` in a clear changed span | Remove only that newly introduced closer. | A directly introduced orphan should not damage surrounding ownership. | Balanced or ambiguous edits remain untouched. |
+| Delete the opening brace of a malformed document-level wrapper | Remove the matching outer closer and preserve the inner text. | Accidental wrappers should be easy to unwrap. | A valid wrapper keeps normal boundary restoration and selection behavior. |
 | Delete a multiline closer programmatically | Restore it and compact one trailing line break. | Programmatic edits have no caret intent; gradual compaction preserves ownership while avoiding a stuck distant closer. | Direct keyboard deletion selects the complete pair instead. |
 
 ## Quote Decisions
@@ -40,8 +45,10 @@ This document records the user intent behind each reconciliation decision. It is
 | --- | --- | --- | --- |
 | Delete part of an opening or closing tag | Restore the complete token in place. | Replacing the surviving fragment avoids duplicating a tag. | Deleting one complete tag unwraps the element. |
 | Delete one complete opening or closing tag | Remove its counterpart and preserve meaningful contents. | Selecting a whole token is explicit unwrap intent. | Empty paired tags are removed with their whitespace. |
+| Delete an exactly selected complete paired element | Remove both tags and preserve the content between them. | The selection identifies an explicit unwrap request after a repaired boundary. | Partial or ambiguous selections are ordinary edits. |
 | Rename a tag name | Synchronize its indexed counterpart. | Ordinary rename editing should not create a mismatch. | A temporarily empty name waits for the next typed replacement. |
 | A provider inserts adjacent opening and closing tags and leaves the caret after both | Move the caret between them. | The likely next intent is typing element contents. | The correction expires after 500 ms and requires the exact document version. |
+| Rename a tag through direct replacement or delete-then-type editing | Update both the opening and closing tag names. | The pair remains structurally synchronized while attributes and contents stay intact. | A temporarily empty name waits for the next replacement. |
 
 ## Indentation Decisions
 
@@ -56,12 +63,47 @@ Pairs record the language that parsed them. HTML documents switch to JavaScript 
 
 The unit matrix covers every language enabled by default, each bracket family, ordinary and multiline quote behavior, markup attributes, and nested HTML/JavaScript/CSS/TSX/Vue examples. Editor-host tests cover direct deletion, exact selection, tags, folding, navigation, counters, and provider caret correction.
 
+The scanner also treats JavaScript and TypeScript regular-expression literals as opaque, tracks nested template expressions, and recognizes JSX/TSX fragments (`<>...</>`) as HTML-owned tag pairs. These helpers are language-scoped through `syntaxstitch.languages` rather than separate per-helper switches.
+
+## Selection Decisions
+
+| Scenario | Default | Reason | Exceptions |
+| --- | --- | --- | --- |
+| Extend a forward selection one character over a matched closing brace | Include its immediately adjacent opener while preserving the native selection extension. | Selecting a complete pair is usually more useful than leaving a balanced selection asymmetrical. | Reversed, multi-cursor, non-adjacent, tag, quote, and ambiguous selections are unchanged. |
+| Extend an already exact balanced brace selection over its enclosing closer | Expand to the enclosing brace pair. | This supports repeated `Shift+Right` expansion through nested expressions without a new command. | The previous selection must be an exact indexed pair. |
+
+## Nested Select Decisions
+
+Nested Select is an interactive navigation and editing mode, entered with **SyntaxStitch: Enter Nested Select**. The separate structural selection commands expand or contract a normal selection. See the [README guide](README.md#nested-select) for setup, keybindings, and a button-editing example. These behaviors are part of the current release.
+
+| Scenario | Current behavior |
+| --- | --- |
+| Enter with one highlighted region containing complete bracket or tag pairs | Build a navigable root set from the outermost indexed pairs inside that region. |
+| Press Right or Left while navigating structures | Enter the focused child structure or return to its parent structure. |
+| Press Up or Down while navigating structures | Cycle matching peers at the current nesting depth, deriving equivalent nested peers when needed. |
+| Tab through the focus | Enter local content and property/value components. Attributes are visited before nested markup when both are present. |
+| Shift+Tab at a nested property boundary | Return to the parent component path at its final component. |
+| Press Up or Down while navigating components | Cycle matching properties by key; cycle values only when both their key and value match. Missing properties are skipped and the eligible set wraps. |
+| Shift+Arrow on an HTML attribute | Select its complete `key="value"` clause; repeat to add adjacent matching clauses across peer elements, including discontiguous ranges. |
+| Type into a focused selection, then press Enter | Finish typing and wait for mirrored edits before resuming navigation. |
+| Return to a saved parent after editing | Restore its selection set and focus with rebased offsets. |
+| Edit a markup attribute value | Match the attribute key on other elements with the same tag name throughout the document, independently of attribute order or the original selection bounds. Missing keys are skipped. Changes containing whitespace do not trigger propagation. |
+| Edit an attribute name | Match the corresponding attribute position on elements with the same tag name. |
+| Finish an HTML ID value edit | Number participating IDs in document order. Only an edited `id` key triggers this step; other keys cannot overwrite IDs. |
+| Toggle a highlight or remove a selection entry | Change the navigation set or its presentation without deleting source text. Toggled-off elements are excluded from attribute propagation and unique-ID renumbering. |
+| Press Escape while typing | Return to navigation; another Escape exits. Existing edits remain. |
+| Close the last tab for a document | Cancel queued attribute edits and prevent automatic repairs without an open editor tab. Explicit user commands can still open a document. |
+| Revert or reload clean saved content | Reindex without repairing or making the buffer dirty again; clear stale selection state and pending edits. |
+
+Editor-host regressions cover mirrored edits from a middle element, attribute-key isolation with reordered attributes, parent restoration, disk reverts, closed documents, and closing a tab with propagation queued.
+
 ## Existing Controls
 
 - `syntaxstitch.enabled` disables all reconciliation.
-- `syntaxstitch.structures` enables or disables `brace`, `tag`, `quote`, and `indent` families.
+- `syntaxstitch.structures` enables or disables `square`, `parenthesis`, `curly`, `tag`, `quote`, and `indent` families. The legacy `brace` value remains supported as an umbrella for all three bracket kinds.
 - `syntaxstitch.languages` limits top-level document languages.
 - `syntaxstitch.fixClosingIndentation` controls only closing-brace alignment.
+- `syntaxstitch.languages` scopes all language-sensitive repair and scanning helpers, including tag synchronization, regex literals, template expressions, JSX/TSX fragments, and Python indentation.
 
 ## Future Rule Policies - Not Implemented
 

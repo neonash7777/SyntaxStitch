@@ -5,7 +5,7 @@ import type * as vscode from 'vscode';
 export type BlockType = 'brace' | 'tag' | 'quote' | 'indent';
 export type RepairKind = 'square' | 'parenthesis' | 'curly' | 'tag' | 'quote' | 'indent';
 export type TokenPair = { id: string; openIdx: number; closeIdx: number; type: BlockType; languageId: string; openToken: string; closeToken: string };
-export type RepairPatch = { offset: number; deleteLength: number; text: string; pairId: string; side: 'open' | 'close'; blockType: BlockType; kind: RepairKind };
+export type RepairPatch = { offset: number; deleteLength: number; text: string; pairId: string; side: 'open' | 'close'; blockType: BlockType; kind: RepairKind; rule: string; selectionKind?: 'pair' | 'token' };
 export type SelectionSpan = { start: number; end: number };
 
 export interface IShadowStructure {
@@ -18,7 +18,7 @@ export interface IShadowStructure {
 	innerSelectionSpan(startIdx: number, endIdx: number, towardEnd?: boolean): SelectionSpan | undefined;
 }
 
-type PairRecord = TokenPair & { openToken: string; closeToken: string };
+type PairRecord = TokenPair & { openToken: string; closeToken: string; unmatched?: boolean };
 type PendingPair = Omit<PairRecord, 'id'>;
 type Change = Pick<vscode.TextDocumentContentChangeEvent, 'range' | 'rangeLength' | 'rangeOffset' | 'text'>;
 
@@ -37,8 +37,11 @@ type TagToken = { start: number; end: number; token: string; name: string; closi
 type TagOpen = Pick<TagToken, 'name' | 'start' | 'token'>;
 
 const pair = (openIdx: number, closeIdx: number, type: BlockType, openToken: string, closeToken: string, languageId: string): PendingPair => ({ openIdx, closeIdx, type, openToken, closeToken, languageId });
+const unmatchedCloser = (idx: number, token: string, languageId: string): PendingPair => ({ openIdx: idx, closeIdx: idx, type: 'brace', openToken: '', closeToken: token, languageId, unmatched: true });
 const parseTagAt = (text: string, start: number, end = text.length): TagToken | undefined => {
 	if (text[start] !== '<' || text.startsWith('<!--', start)) { return undefined; }
+	if (text.startsWith('<>', start)) { return { start, end: start + 2, token: '<>', name: '#fragment', closing: false, selfClosing: false, quotes: [] }; }
+	if (text.startsWith('</>', start)) { return { start, end: start + 3, token: '</>', name: '#fragment', closing: true, selfClosing: false, quotes: [] }; }
 	const head = text.slice(start, Math.min(end, start + 128)).match(/^<\s*(\/?)\s*([A-Za-z][\w:.-]*)/);
 	if (!head) { return undefined; }
 	let quote = '', escaped = false, cursor = start + head[0].length;
@@ -83,13 +86,36 @@ const scanString = (text: string, openIdx: number, end: number, languageId: stri
 	}
 	return end - 1;
 };
-function scanCode(text: string, start: number, end: number, languageId: string, pairs: PendingPair[], stopAtBrace = false): number {
+const REGEX_LANGUAGES = new Set(['javascript', 'javascriptreact', 'typescript', 'typescriptreact']);
+const regexMayStart = (text: string, idx: number, start: number): boolean => {
+	for (let cursor = idx - 1; cursor >= start; cursor--) {
+		if (/\s/.test(text[cursor])) { continue; }
+		return /[=([{!?:;,]/.test(text[cursor]) || text.slice(Math.max(start, cursor - 7), cursor + 1).match(/\b(?:case|return|throw|else|yield|await)$/) !== null;
+		}
+	return true;
+};
+const scanRegex = (text: string, openIdx: number, end: number): number => {
+	let characterClass = false;
+	for (let idx = openIdx + 1; idx < end; idx++) {
+		if (text[idx] === '\\') { idx++; continue; }
+		if (text[idx] === '[') { characterClass = true; continue; }
+		if (text[idx] === ']') { characterClass = false; continue; }
+		if (text[idx] === '/' && !characterClass) {
+			while (/[A-Za-z]/.test(text[idx + 1] ?? '')) { idx++; }
+			return idx;
+		}
+		if (text[idx] === '\r' || text[idx] === '\n') { return openIdx; }
+	}
+	return openIdx;
+};
+function scanCode(text: string, start: number, end: number, languageId: string, pairs: PendingPair[], stopAtBrace = false, includeUnmatched = false): number {
 	const braces: { token: string; idx: number }[] = [], tags: TagOpen[] = [];
 	const css = languageId === 'css';
 	for (let idx = start; idx < end; idx++) {
 		const char = text[idx], next = text[idx + 1] ?? '';
 		if (char === '/' && next === '*') { const close = text.indexOf('*/', idx + 2); idx = close < 0 ? end : close + 1; continue; }
 		if (!css && char === '/' && next === '/') { const close = text.indexOf('\n', idx + 2); idx = close < 0 ? end : close; continue; }
+		if (REGEX_LANGUAGES.has(languageId) && char === '/' && next !== '*' && next !== '/' && regexMayStart(text, idx, start)) { const close = scanRegex(text, idx, end); if (close > idx) { idx = close; continue; } }
 		if (char === '"' || char === "'") { idx = scanString(text, idx, end, languageId, pairs); continue; }
 		if (char === '`') { idx = scanTemplate(text, idx, end, languageId, pairs); continue; }
 		if (JSX_LANGUAGES.has(languageId) && char === '<') { const tag = parseTagAt(text, idx, end); if (tag) { addTag(tag, tags, pairs, 'html'); idx = tag.end - 1; continue; } }
@@ -97,7 +123,8 @@ function scanCode(text: string, start: number, end: number, languageId: string, 
 		if (!CLOSING_BRACES.has(char)) { continue; }
 		if (char === '}' && stopAtBrace && !braces.length) { return idx; }
 		const open = braces.at(-1);
-		if (open && BRACES.get(open.token) === char) { braces.pop(); pairs.push(pair(open.idx, idx, 'brace', open.token, char, languageId)); }
+		if (!open || BRACES.get(open.token) !== char) { if (includeUnmatched) { pairs.push(unmatchedCloser(idx, char, languageId)); } continue; }
+		braces.pop(); pairs.push(pair(open.idx, idx, 'brace', open.token, char, languageId));
 	}
 	return end;
 }
@@ -156,9 +183,9 @@ const indexIndents = (text: string): PendingPair[] => {
 	for (const open of stack.reverse()) { pairs.push(pair(open.idx, text.length, 'indent', open.token, '', 'python')); }
 	return pairs;
 };
-const indexDocument = (text: string, languageId: string): PendingPair[] => {
+const indexDocument = (text: string, languageId: string, includeUnmatched = false): PendingPair[] => {
 	const pairs: PendingPair[] = [];
-	if (MARKUP_LANGUAGES.has(languageId)) { scanMarkup(text, languageId, pairs); } else { scanCode(text, 0, text.length, languageId, pairs); }
+	if (MARKUP_LANGUAGES.has(languageId)) { scanMarkup(text, languageId, pairs); } else { scanCode(text, 0, text.length, languageId, pairs, false, includeUnmatched); }
 	if (languageId === 'python') { pairs.push(...indexIndents(text)); }
 	return pairs;
 };
@@ -167,6 +194,8 @@ const indexDocument = (text: string, languageId: string): PendingPair[] => {
 // region Reconciliation
 const overlaps = (start: number, end: number, tokenIdx: number, tokenLength: number): boolean => tokenLength ? start < tokenIdx + tokenLength && end > tokenIdx : start <= tokenIdx && end > tokenIdx;
 const tagIdentity = (token: string): string | undefined => {
+	if (token === '<>') { return 'open:#fragment'; }
+	if (token === '</>') { return 'close:#fragment'; }
 	const match = token.match(/^<\s*(\/?)\s*([A-Za-z][\w:.-]*)/);
 	return match ? `${match[1] ? 'close' : 'open'}:${match[2].toLowerCase()}` : undefined;
 };
@@ -195,6 +224,18 @@ const counterpartRebound = (pair: PairRecord, side: 'open' | 'close', changes: r
 	const scopedPairs = resultingPairs.filter(candidate => candidate.languageId === pair.languageId);
 	return scopedPairs.length >= originalPairCount && scopedPairs.some(candidate => candidate.type === pair.type && candidate[endpoint] === mappedIdx && sameBoundary(candidate[token], pair[token], pair.type));
 };
+const restorePartialTag = (pair: PairRecord, side: 'open' | 'close', change: Change, changes: readonly Change[]): Pick<RepairPatch, 'offset' | 'deleteLength' | 'text'> | undefined => {
+	if (pair.type !== 'tag' || change.text) { return undefined; }
+	const token = side === 'open' ? pair.openToken : pair.closeToken, tokenIdx = side === 'open' ? pair.openIdx : pair.closeIdx;
+	if (change.rangeOffset !== tokenIdx + token.length - 1 || change.rangeLength !== 1 || token.at(-1) !== '>') { return undefined; }
+	const offset = mapOffset(tokenIdx, changes, false), end = mapOffset(tokenIdx + token.length, changes, true);
+	return { offset, deleteLength: Math.max(0, end - offset), text: token };
+};
+const restoreSelectedTagContents = (source: string, pair: PairRecord, change: Change, changes: readonly Change[]): Pick<RepairPatch, 'offset' | 'deleteLength' | 'text'> | undefined => {
+	const end = pair.closeIdx + pair.closeToken.length;
+	if (pair.type !== 'tag' || change.rangeOffset !== pair.openIdx || change.rangeLength !== end - pair.openIdx) { return undefined; }
+	return { offset: mapOffset(pair.openIdx, changes, false), deleteLength: 0, text: source.slice(pair.openIdx + pair.openToken.length, pair.closeIdx) };
+};
 const removeExactTagPair = (pair: PairRecord, side: 'open' | 'close', change: Change, changes: readonly Change[]): Pick<RepairPatch, 'offset' | 'deleteLength' | 'text'> | undefined => {
 	const token = side === 'open' ? pair.openToken : pair.closeToken, tokenIdx = side === 'open' ? pair.openIdx : pair.closeIdx;
 	if (pair.type !== 'tag' || change.text || change.rangeOffset !== tokenIdx || change.rangeLength !== token.length) { return undefined; }
@@ -204,7 +245,9 @@ const removeExactTagPair = (pair: PairRecord, side: 'open' | 'close', change: Ch
 };
 const removeExactGroupingPair = (source: string, pair: PairRecord, side: 'open' | 'close', change: Change, changes: readonly Change[]): Pick<RepairPatch, 'offset' | 'deleteLength' | 'text'> | undefined => {
 	const token = side === 'open' ? pair.openToken : pair.closeToken, tokenIdx = side === 'open' ? pair.openIdx : pair.closeIdx, previous = source.slice(0, pair.openIdx).match(/\S(?=\s*$)/)?.[0];
-	if (pair.type !== 'brace' || pair.openToken !== '(' || change.text || change.rangeOffset !== tokenIdx || change.rangeLength !== token.length || (previous && /[\w$.)\]]/.test(previous))) { return undefined; }
+	const documentWrapper = pair.type === 'brace' && pair.openToken === '{' && side === 'open' && !source.slice(0, pair.openIdx).trim() && !source.slice(pair.closeIdx + pair.closeToken.length).trim();
+	const malformedWrapper = documentWrapper && indexDocument(source, pair.languageId, true).some(candidate => candidate.unmatched && pair.openIdx < candidate.closeIdx && candidate.closeIdx < pair.closeIdx);
+	if (pair.type !== 'brace' || (pair.openToken !== '(' && !malformedWrapper) || change.text || change.rangeOffset !== tokenIdx || change.rangeLength !== token.length || (!malformedWrapper && previous && /[\w$.)\]]/.test(previous))) { return undefined; }
 	const counterpartIdx = side === 'open' ? pair.closeIdx : pair.openIdx, counterpart = side === 'open' ? pair.closeToken : pair.openToken;
 	const offset = mapOffset(counterpartIdx, changes, false), end = mapOffset(counterpartIdx + counterpart.length, changes, true);
 	return { offset, deleteLength: Math.max(0, end - offset), text: '' };
@@ -275,6 +318,12 @@ export class ShadowStructure implements IShadowStructure {
 			.sort((left, right) => towardEnd ? right.end - left.end || right.start - left.start : left.start - right.start || left.end - right.end)[0];
 	}
 
+	innerSelectionSpans(startIdx: number, endIdx: number): SelectionSpan[] {
+		const candidates = [...this.#pairs.values()].filter(pair => (pair.type === 'brace' || pair.type === 'tag') && startIdx <= pair.openIdx && pair.closeIdx + pair.closeToken.length <= endIdx)
+			.map(pair => ({ start: pair.openIdx + pair.openToken.length, end: pair.closeIdx }));
+		return candidates.filter(span => !candidates.some(parent => parent !== span && parent.start <= span.start && span.end <= parent.end)).sort((left, right) => left.start - right.start);
+	}
+
 	healEdit(change: vscode.TextDocumentContentChangeEvent, violations: TokenPair[]): vscode.TextDocumentContentChangeEvent {
 		const records = violations.map(pair => this.#pairs.get(pair.id)).filter((pair): pair is PairRecord => !!pair);
 		const prefix = records.filter(pair => overlaps(change.rangeOffset, change.rangeOffset + change.rangeLength, pair.openIdx, pair.openToken.length) && !suppliesEquivalent(change.text, pair, 'open')).map(pair => pair.openToken).join('');
@@ -296,8 +345,28 @@ export class ShadowStructure implements IShadowStructure {
 			const touches = (idx: number, length: number): boolean => changes.some(change => overlaps(change.rangeOffset, change.rangeOffset + change.rangeLength, idx, length));
 			return touches(pair.openIdx, pair.openToken.length) && touches(pair.closeIdx, pair.closeToken.length);
 		})()).map(pair => pair.id));
-		const resultingPairs = new Map<BlockType, PendingPair[]>();
-		if (resultingText !== undefined) { for (const candidate of indexDocument(resultingText, this.#languageId)) { resultingPairs.set(candidate.type, [...(resultingPairs.get(candidate.type) ?? []), candidate]); } }
+		const resultingPairs = new Map<BlockType, PendingPair[]>(), resultingUnmatched: PendingPair[] = [];
+		if (resultingText !== undefined) {
+			for (const candidate of indexDocument(resultingText, this.#languageId, true)) {
+				if (candidate.unmatched) { resultingUnmatched.push(candidate); } else { resultingPairs.set(candidate.type, [...(resultingPairs.get(candidate.type) ?? []), candidate]); }
+			}
+		}
+		if (resultingText !== undefined) {
+			for (const change of changes) {
+				if (!change.text) { continue; }
+				const changedStart = mapOffset(change.rangeOffset, changes, false), changedEnd = mapOffset(change.rangeOffset + change.rangeLength, changes, true);
+				for (const candidate of resultingUnmatched.filter(candidate => candidate.closeIdx >= changedStart && candidate.closeIdx < changedEnd)) {
+					patches.set(`${candidate.closeIdx}:1:`, { offset: candidate.closeIdx, deleteLength: candidate.closeToken.length, text: '', pairId: randomUUID(), side: 'close', blockType: 'brace', kind: 'curly', rule: 'remove-unmatched-closer' });
+				}
+			}
+		}
+		for (const pair of this.#pairs.values()) {
+			if (!fullyTouched.has(pair.id)) { continue; }
+			for (const change of changes) {
+				const unwrap = restoreSelectedTagContents(this.#source, pair, change, changes);
+				if (unwrap) { patches.set(`${unwrap.offset}:${unwrap.deleteLength}:${unwrap.text}`, { ...unwrap, pairId: pair.id, side: 'open', blockType: 'tag', kind: 'tag', rule: 'unwrap-selected-tag' }); }
+			}
+		}
 		for (const change of [...changes].sort((left, right) => right.rangeOffset - left.rangeOffset)) {
 			const start = change.rangeOffset, end = start + change.rangeLength;
 			for (const violation of this.validateEdit(start, end)) {
@@ -305,16 +374,22 @@ export class ShadowStructure implements IShadowStructure {
 				if (fullyTouched.has(pair.id)) { continue; }
 				const openHit = overlaps(start, end, pair.openIdx, pair.openToken.length), side = openHit ? 'open' : 'close';
 				if (suppliesEquivalent(change.text, pair, side)) { continue; }
+				const partialTag = restorePartialTag(pair, side, change, changes);
+				if (partialTag) {
+					patches.set(`${partialTag.offset}:${partialTag.deleteLength}:${partialTag.text}`, { ...partialTag, pairId: pair.id, side, blockType: 'tag', kind: 'tag', rule: 'restore-partial-tag', selectionKind: 'token' });
+					continue;
+				}
+				const originalPairCount = [...this.#pairs.values()].filter(candidate => candidate.type === pair.type && candidate.languageId === pair.languageId).length;
+				if (resultingText !== undefined && counterpartRebound(pair, side, changes, resultingPairs.get(pair.type) ?? [], originalPairCount)) { continue; }
 				const emptyPairRemoval = resultingText === undefined ? undefined : removeEmptyPair(pair, side, change, changes, resultingText);
 				const pairRemoval = emptyPairRemoval ?? removeExactTagPair(pair, side, change, changes) ?? removeExactGroupingPair(this.#source, pair, side, change, changes);
-				const originalPairCount = [...this.#pairs.values()].filter(candidate => candidate.type === pair.type && candidate.languageId === pair.languageId).length;
-				if (!pairRemoval && resultingText !== undefined && counterpartRebound(pair, side, changes, resultingPairs.get(pair.type) ?? [], originalPairCount)) { continue; }
 				const compaction = resultingText === undefined || pairRemoval ? undefined : compactBeforeCloser(pair, side, change, changes, resultingText);
 				const restoring = side === 'open' || pair.closeToken.length > 0;
 				const token = openHit ? pair.openToken : pair.closeToken, oldOffset = restoring ? (openHit ? pair.openIdx : pair.closeIdx) : pair.openIdx;
 				const mappedStart = mapOffset(oldOffset, changes, false), mappedEnd = mapOffset(oldOffset + token.length, changes, true);
 				const intentional = pairRemoval ?? compaction;
-				const patch = { offset: intentional?.offset ?? mappedStart, deleteLength: intentional?.deleteLength ?? (restoring ? Math.max(0, mappedEnd - mappedStart) : pair.openToken.length), text: intentional?.text ?? (restoring ? token : ''), pairId: pair.id, side, blockType: pair.type, kind: repairKind(pair) } satisfies RepairPatch;
+				const rule = emptyPairRemoval ? 'remove-empty-pair' : pairRemoval ? pair.type === 'tag' ? 'remove-tag-counterpart' : 'unwrap-grouping' : compaction ? 'compact-closer' : restoring ? side === 'open' ? 'restore-opener' : 'restore-closer' : 'remove-orphan';
+				const patch = { offset: intentional?.offset ?? mappedStart, deleteLength: intentional?.deleteLength ?? (restoring ? Math.max(0, mappedEnd - mappedStart) : pair.openToken.length), text: intentional?.text ?? (restoring ? token : ''), pairId: pair.id, side, blockType: pair.type, kind: repairKind(pair), rule } satisfies RepairPatch;
 				if (patch.text || patch.deleteLength) { patches.set(`${patch.offset}:${patch.deleteLength}:${patch.text}`, patch); }
 			}
 		}

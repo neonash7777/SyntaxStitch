@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## Unreleased
 
+## 0.0.6 - 2026-09-19
+
+### Added
+
+- Nested Select with keyboard navigation through structures, contents, HTML attributes, and CSS declaration components. See the [usage guide](README.md#nested-select) for shortcuts, an editing walkthrough, and current matching scope.
+- Matching markup attribute-value edits by key and tag name, plus numbered HTML IDs when finishing an ID edit.
+- Document mismatched-closer cleanup, malformed document-wrapper unwrapping, regex-literal shielding, JSX fragment tracking, nested template expressions, and balanced forward-selection expansion.
+- Clarify that tag renames synchronize both opening and closing names, including delete-then-type edits.
+
+### Fixed
+
+- Avoid duplicate leaf selection levels and incorrect parent offsets after mirrored attribute edits.
+- Restrict HTML ID finalization to the edited `id` key, preserving other attributes regardless of their order.
+- Keep reverted and reloaded documents clean, cancel queued attribute edits when their last tab closes, and skip automatic repairs on documents without an open editor tab.
+
 ## 0.0.5 - 2026-09-11
 
 ### Added

@@ -2,7 +2,7 @@
   "name": "syntaxstitch",
   "displayName": "SyntaxStitch",
   "description": "Stops mismatched brackets, quotes, tags, and indentation from turning AI edits into cascading syntax failures.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "BrockNash",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -45,7 +45,9 @@
     "Linters"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onCommand:syntaxstitch.deleteLeft",
+    "onCommand:syntaxstitch.deleteRight"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -53,6 +55,10 @@
       {
         "command": "syntaxstitch.showMenu",
         "title": "SyntaxStitch: Show Actions"
+      },
+      {
+        "command": "syntaxstitch.openSettings",
+        "title": "SyntaxStitch: Open Settings"
       },
       {
         "command": "syntaxstitch.toggle",
@@ -66,6 +72,24 @@
         "command": "syntaxstitch.selectInnerStructure",
         "title": "SyntaxStitch: Select Inner Structure"
       },
+      {
+        "command": "syntaxstitch.enterStructuralSelectionMode",
+        "title": "SyntaxStitch: Enter Nested Select"
+      },
+      { "command": "syntaxstitch.exitStructuralSelectionTyping", "title": "SyntaxStitch: Nested Select: Finish Typing" },
+      { "command": "syntaxstitch.exitStructuralSelectionMode", "title": "SyntaxStitch: Exit Nested Select" },
+      { "command": "syntaxstitch.structuralSelectionNext", "title": "SyntaxStitch: Nested Select: Focus Next Selection" },
+      { "command": "syntaxstitch.structuralSelectionPrevious", "title": "SyntaxStitch: Nested Select: Focus Previous Selection" },
+      { "command": "syntaxstitch.structuralSelectionComponents", "title": "SyntaxStitch: Nested Select: Select Inner Components" },
+      { "command": "syntaxstitch.structuralSelectionExpandRight", "title": "SyntaxStitch: Nested Select: Add Next Selection" },
+      { "command": "syntaxstitch.structuralSelectionExpandLeft", "title": "SyntaxStitch: Nested Select: Add Previous Selection" },
+      { "command": "syntaxstitch.structuralSelectionToggle", "title": "SyntaxStitch: Nested Select: Toggle Focused Highlight" },
+      { "command": "syntaxstitch.structuralSelectionDelete", "title": "SyntaxStitch: Nested Select: Remove Focused Selection" },
+      { "command": "syntaxstitch.structuralSelectionEnter", "title": "SyntaxStitch: Nested Select: Enter Focused Structure" },
+      { "command": "syntaxstitch.structuralSelectionDrillDown", "title": "SyntaxStitch: Nested Select: Cycle to Next Sibling" },
+      { "command": "syntaxstitch.structuralSelectionDrillUp", "title": "SyntaxStitch: Nested Select: Cycle to Previous Sibling" },
+      { "command": "syntaxstitch.structuralSelectionHome", "title": "SyntaxStitch: Nested Select: Focus First Selection" },
+      { "command": "syntaxstitch.structuralSelectionEnd", "title": "SyntaxStitch: Nested Select: Focus Last Selection" },
       {
         "command": "syntaxstitch.structuralTab",
         "title": "SyntaxStitch: Structural Tab"
@@ -125,7 +149,53 @@
         "command": "syntaxstitch.selectInnerStructure",
         "key": "cmd+pagedown",
         "when": "editorTextFocus && editorHasSelection && isMac"
-      }
+      },
+      {
+        "command": "syntaxstitch.enterStructuralSelectionMode",
+        "key": "ctrl+alt+s",
+        "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "syntaxstitch.enterStructuralSelectionMode",
+        "key": "cmd+alt+s",
+        "when": "editorTextFocus && editorHasSelection && isMac"
+      },
+      {
+        "command": "syntaxstitch.enterStructuralSelectionMode",
+        "key": "cmd+alt+enter",
+        "when": "editorTextFocus && editorHasSelection && isMac"
+      },
+      {
+        "command": "syntaxstitch.enterStructuralSelectionMode",
+        "key": "cmd+alt+right",
+        "when": "editorTextFocus && editorHasSelection && isMac"
+      },
+      { "command": "syntaxstitch.structuralSelectionComponents", "key": "tab", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionPrevious", "key": "shift+tab", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionNext", "key": "right", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionPrevious", "key": "left", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionDrillDown", "key": "down", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionDrillUp", "key": "up", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionEnter", "key": "enter", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionExpandRight", "key": "shift+right", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionExpandLeft", "key": "shift+left", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionDrillDown", "key": "shift+down", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionDrillUp", "key": "shift+up", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "-cursorRightSelect", "key": "shift+right", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode" },
+      { "command": "-cursorLeftSelect", "key": "shift+left", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode" },
+      { "command": "-cursorDownSelect", "key": "shift+down", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode" },
+      { "command": "-cursorUpSelect", "key": "shift+up", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode" },
+      { "command": "syntaxstitch.structuralSelectionToggle", "key": "space", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionDelete", "key": "delete", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionDelete", "key": "forwarddelete", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode" },
+      { "command": "syntaxstitch.structuralSelectionDrillDown", "key": "pagedown", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionDrillUp", "key": "pageup", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.exitStructuralSelectionTyping", "key": "enter", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.structuralSelectionDrillUp", "key": "shift+enter", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode" },
+      { "command": "syntaxstitch.structuralSelectionHome", "key": "home", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode" },
+      { "command": "syntaxstitch.structuralSelectionEnd", "key": "end", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode" },
+      { "command": "syntaxstitch.exitStructuralSelectionTyping", "key": "escape", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && syntaxstitch.structuralSelectionTyping" },
+      { "command": "syntaxstitch.exitStructuralSelectionMode", "key": "escape", "when": "editorTextFocus && syntaxstitch.structuralSelectionMode && !syntaxstitch.structuralSelectionTyping" }
     ],
     "configuration": {
       "title": "SyntaxStitch",
@@ -160,20 +230,34 @@
           "items": {
             "type": "string",
             "enum": [
+              "parenthesis",
+              "square",
+              "curly",
               "brace",
               "tag",
               "quote",
               "indent"
             ]
           },
+          "enumDescriptions": [
+            "Repair (), parentheses.",
+            "Repair [], square brackets.",
+            "Repair {}, curly braces.",
+            "Legacy umbrella: repair all three bracket families.",
+            "Repair markup tags.",
+            "Repair quoted strings and quote boundaries.",
+            "Repair indentation boundaries."
+          ],
           "uniqueItems": true,
           "default": [
-            "brace",
+            "parenthesis",
+            "square",
+            "curly",
             "tag",
             "quote",
             "indent"
           ],
-          "description": "Structural pair types SyntaxStitch may repair, including language-scoped quotes."
+          "description": "Structural pair types SyntaxStitch may repair. brace enables all (), [], and {} repairs; square, parenthesis, and curly can be selected individually."
         },
         "syntaxstitch.languages": {
           "type": "array",
@@ -263,6 +347,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
+    "@types/react": "^19.3.0",
     "@types/vscode": "1.125.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",

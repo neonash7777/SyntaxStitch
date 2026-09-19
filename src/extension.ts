@@ -1,12 +1,16 @@
 import * as vscode from 'vscode';
-import { ShadowStructure, type BlockType, type RepairKind, type RepairPatch, type TokenPair } from './shadowStructure';
+import { ShadowStructure, type BlockType, type RepairKind, type RepairPatch, type SelectionSpan, type TokenPair } from './shadowStructure';
 
 // region State
 type DocumentState = { shadow: ShadowStructure; languageId: string };
-export type RepairStatistics = { total: number; byKind: Record<RepairKind, number>; unclassified: number; lastAt?: string; lastUri?: string; lastRepair?: string };
+type RepairSource = 'direct' | 'indirect';
+type StructureSetting = BlockType | 'square' | 'parenthesis' | 'curly';
+const REPAIR_KINDS: readonly RepairKind[] = ['square', 'parenthesis', 'curly', 'tag', 'quote', 'indent'];
+export type RepairStatistics = { total: number; byKind: Record<RepairKind, number>; bySource?: Record<RepairSource, number>; byKindSource?: Record<RepairKind, Record<RepairSource, number>>; unclassified: number; firstAt?: string; lastAt?: string; lastUri?: string; lastRepair?: string };
 type LegacyRepairStatistics = { total: number; byType?: Partial<Record<BlockType, number>>; lastAt?: string; lastUri?: string };
 const states = new Map<string, DocumentState>();
 const repairing = new Set<string>();
+let statisticsPanel: vscode.WebviewPanel | undefined;
 const OUTPUT_NAME = 'SyntaxStitch';
 const CONFIG_SECTION = 'syntaxstitch';
 const STATISTICS_KEY = 'syntaxstitch.repairStatistics';
@@ -16,16 +20,608 @@ type PairLabelMode = 'off' | 'active' | 'all';
 type SelectionSnapshot = { anchor: number; active: number }[];
 type SelectionTransition = { version: number; from: SelectionSnapshot; to: SelectionSnapshot };
 const selectionHistory = new WeakMap<vscode.TextEditor, SelectionTransition[]>();
+const lastSelections = new WeakMap<vscode.TextEditor, SelectionSnapshot>();
+type StructuralSelectionRole = 'structure' | 'property' | 'value' | 'value-part' | 'attribute';
+type StructuralSelectionSpan = SelectionSpan & { active: boolean; highlighted?: boolean; role: StructuralSelectionRole; attributeName?: string };
+type StructuralSelectionStage = 'structure' | 'inner' | 'components';
+type StructuralSelectionLevel = { scope: SelectionSpan; spans: StructuralSelectionSpan[]; focused: number; stage: StructuralSelectionStage };
+type StructuralSelectionMode = StructuralSelectionLevel & { ancestors?: StructuralSelectionLevel[]; typing?: boolean };
+const structuralSelectionModes = new WeakMap<vscode.TextEditor, StructuralSelectionMode>();
+let structuralSelectionDecoration: vscode.TextEditorDecorationType;
+let structuralSelectionFocusedDecoration: vscode.TextEditorDecorationType;
+let structuralSelectionInactiveDecoration: vscode.TextEditorDecorationType;
+let structuralSelectionFocusedInactiveDecoration: vscode.TextEditorDecorationType;
+let structuralSelectionComponentDecoration: vscode.TextEditorDecorationType;
 type DirectDeletion = { editor: vscode.TextEditor; direction: 'left' | 'right'; offset: number; completed: Promise<void>; complete: () => void; selection?: vscode.Selection };
 const directDeletions = new Map<string, DirectDeletion>();
 const pendingTagCarets = new WeakMap<vscode.TextEditor, { afterOpen: number; afterClose: number; version: number; expiresAt: number }>();
 type PendingTagRename = { tokenStart: number; counterpartNameStart: number; counterpartNameLength: number };
 const pendingTagRenames = new Map<string, PendingTagRename>();
+const pendingComponentPropagations = new WeakMap<vscode.TextEditor, Promise<boolean>>();
+const pendingComponentTimers = new WeakMap<vscode.TextEditor, ReturnType<typeof setTimeout>>();
+const pendingComponentChanges = new WeakMap<vscode.TextEditor, vscode.TextDocumentContentChangeEvent>();
+const pendingComponentCancellations = new Map<vscode.TextEditor, () => void>();
+const documentHasOpenEditor = (document: vscode.TextDocument): boolean => !document.isClosed && vscode.window.tabGroups.all.some(group => group.tabs.some(tab => {
+	const input = tab.input;
+	return input instanceof vscode.TabInputText ? input.uri.toString() === document.uri.toString()
+		: input instanceof vscode.TabInputTextDiff && input.modified.toString() === document.uri.toString();
+}));
 
 const snapshotSelections = (editor: vscode.TextEditor): SelectionSnapshot => editor.selections.map(selection => ({ anchor: editor.document.offsetAt(selection.anchor), active: editor.document.offsetAt(selection.active) }));
 const selectionsMatch = (left: SelectionSnapshot, right: SelectionSnapshot): boolean => left.length === right.length && left.every((selection, index) => selection.anchor === right[index].anchor && selection.active === right[index].active);
 const restoreSelections = (editor: vscode.TextEditor, snapshot: SelectionSnapshot): void => { editor.selections = snapshot.map(selection => new vscode.Selection(editor.document.positionAt(selection.anchor), editor.document.positionAt(selection.active))); };
-
+const balanceForwardSelection = (editor: vscode.TextEditor, previous: SelectionSnapshot | undefined, current: SelectionSnapshot): void => {
+	if (!previous || previous.length !== 1 || current.length !== 1) { return; }
+	const before = previous[0], after = current[0];
+	if (before.anchor !== after.anchor || before.active + 1 !== after.active || before.active <= before.anchor) { return; }
+	index(editor.document);
+	const shadow = states.get(keyOf(editor.document))?.shadow, start = after.anchor, end = after.active;
+	const pair = shadow?.pairs.find(candidate => candidate.type === 'brace' && candidate.closeIdx === end - 1 && candidate.closeToken.length === 1 && (
+		(candidate.openIdx === start - 1 && candidate.openToken.length === 1) ||
+		(shadow.pairs.some(inner => inner.type === 'brace' && inner.openIdx === before.anchor && inner.closeIdx + inner.closeToken.length === before.active) && candidate.openIdx < before.anchor)
+	));
+	if (!pair) { return; }
+	editor.selection = new vscode.Selection(editor.document.positionAt(pair.openIdx), editor.document.positionAt(end));
+};
+const renderStructuralSelectionMode = (editor: vscode.TextEditor, mode: StructuralSelectionMode | undefined): void => {
+	if (!mode) { editor.setDecorations(structuralSelectionDecoration, []); editor.setDecorations(structuralSelectionComponentDecoration, []); editor.setDecorations(structuralSelectionFocusedDecoration, []); editor.setDecorations(structuralSelectionInactiveDecoration, []); editor.setDecorations(structuralSelectionFocusedInactiveDecoration, []); return; }
+	const ancestorSpans = mode.ancestors?.flatMap(level => level.spans) ?? [], structuralSpans = [...ancestorSpans, ...mode.spans], ranges = structuralSpans.filter(span => span.active && span.highlighted !== false && span.role === 'structure' && span.start < span.end).map(span => new vscode.Range(editor.document.positionAt(span.start), editor.document.positionAt(span.end))), components = mode.spans.filter(span => span.active && span.highlighted !== false && span.role !== 'structure' && span.start < span.end).map(span => new vscode.Range(editor.document.positionAt(span.start), editor.document.positionAt(span.end))), inactive = [...ancestorSpans.filter(span => span.active && span.highlighted === false && span.start < span.end), ...mode.spans.filter((span, index) => span.active && span.highlighted === false && index !== mode.focused && span.start < span.end)].map(span => new vscode.Range(editor.document.positionAt(span.start), editor.document.positionAt(span.end))), focused = mode.spans[mode.focused], focusedInactive = focused && focused.highlighted === false && focused.start < focused.end ? [new vscode.Range(editor.document.positionAt(focused.start), editor.document.positionAt(focused.end))] : [];
+	editor.setDecorations(structuralSelectionDecoration, ranges);
+	editor.setDecorations(structuralSelectionComponentDecoration, components);
+	editor.setDecorations(structuralSelectionInactiveDecoration, inactive);
+	editor.setDecorations(structuralSelectionFocusedDecoration, focused && focused.active ? [new vscode.Range(editor.document.positionAt(focused.start), editor.document.positionAt(focused.end))] : []);
+	editor.setDecorations(structuralSelectionFocusedInactiveDecoration, focusedInactive);
+};
+const applyStructuralSelectionMode = (editor: vscode.TextEditor, mode: StructuralSelectionMode): void => {
+	structuralSelectionModes.set(editor, mode);
+	void vscode.commands.executeCommand('setContext', 'syntaxstitch.structuralSelectionMode', true);
+	void vscode.commands.executeCommand('setContext', 'syntaxstitch.structuralSelectionTyping', !!mode.typing);
+	const focused = mode.spans[mode.focused];
+	if (focused && !mode.typing) { const position = editor.document.positionAt(focused.start); editor.selection = focused.active && focused.highlighted !== false ? new vscode.Selection(position, editor.document.positionAt(focused.end)) : new vscode.Selection(position, position); }
+	renderStructuralSelectionMode(editor, mode);
+};
+const levelOf = (mode: StructuralSelectionMode): StructuralSelectionLevel => ({ scope: { ...mode.scope }, spans: mode.spans.map(span => ({ ...span })), focused: mode.focused, stage: mode.stage });
+const restoreStructuralLevel = (mode: StructuralSelectionMode, level: StructuralSelectionLevel, ancestors: StructuralSelectionLevel[]): StructuralSelectionMode => ({ ...mode, scope: level.scope, spans: level.spans.map(span => ({ ...span })), focused: level.focused, stage: level.stage, ancestors });
+const drillIntoStructuralSelection = (editor: vscode.TextEditor): boolean => {
+	const mode = structuralSelectionModes.get(editor), focused = mode?.spans[mode.focused];
+	if (!mode || !focused) { return false; }
+	if (mode.typing) { applyStructuralSelectionMode(editor, { ...mode, typing: false }); return true; }
+	index(editor.document);
+	const shadow = states.get(keyOf(editor.document))!.shadow, children = shadow.pairs.filter(pair => (pair.type === 'brace' || pair.type === 'tag') && focused.start < pair.openIdx && pair.closeIdx + pair.closeToken.length <= focused.end).map(pair => ({ start: pair.openIdx, end: pair.closeIdx + pair.closeToken.length, active: true, role: 'structure' as const }));
+	// A leaf component cannot provide a deeper level; let Enter restore its parent.
+	if (!children.length && (focused.role !== 'structure' || (mode.spans.length === 1 && mode.scope.start === focused.start && mode.scope.end === focused.end))) { return false; }
+	const content = children.length ? children : focused.end > focused.start ? [{ start: focused.start, end: focused.end, active: true, role: 'structure' as const }] : [];
+	if (!content.length) { return false; }
+	applyStructuralSelectionMode(editor, { ...mode, ancestors: [...(mode.ancestors ?? []), levelOf(mode)], scope: { start: focused.start, end: focused.end }, spans: content, focused: 0, stage: 'structure' });
+	return true;
+};
+const climbStructuralSelection = (editor: vscode.TextEditor): boolean => {
+	const mode = structuralSelectionModes.get(editor);
+	if (!mode) { return false; }
+	if (mode.typing) { applyStructuralSelectionMode(editor, { ...mode, typing: false }); return true; }
+	if (mode.stage === 'structure') {
+		const ancestor = mode.ancestors?.at(-1);
+		if (ancestor) {
+			const focused = mode.spans.length === ancestor.spans.length ? mode.focused : ancestor.focused;
+			applyStructuralSelectionMode(editor, restoreStructuralLevel(mode, { ...ancestor, focused }, mode.ancestors?.slice(0, -1) ?? []));
+			return true;
+		}
+	}
+	if (mode.stage === 'components') {
+		const ancestor = mode.ancestors?.at(-1);
+		if (ancestor) { applyStructuralSelectionMode(editor, restoreStructuralLevel(mode, ancestor, mode.ancestors?.slice(0, -1) ?? [])); return true; }
+		const focused = mode.spans[mode.focused], parent = focused && states.get(keyOf(editor.document))!.shadow.pairs.filter(pair => (pair.type === 'brace' || pair.type === 'tag') && pair.openIdx <= focused.start && pair.closeIdx + pair.closeToken.length >= focused.end).sort((left, right) => right.openIdx - left.openIdx)[0], inner = parent ? [{ start: parent.openIdx + parent.openToken.length, end: parent.closeIdx, active: true, role: 'structure' as const }] : [];
+		if (inner.length) { applyStructuralSelectionMode(editor, { ...mode, spans: inner, focused: 0, stage: 'inner' }); return true; }
+	}
+	if (mode.stage === 'inner') {
+		const ancestor = mode.ancestors?.at(-1);
+		if (ancestor) { applyStructuralSelectionMode(editor, restoreStructuralLevel(mode, ancestor, mode.ancestors?.slice(0, -1) ?? [])); return true; }
+		const focused = mode.spans[mode.focused], parent = focused && states.get(keyOf(editor.document))!.shadow.pairs.find(pair => pair.openIdx < focused.start && pair.closeIdx + pair.closeToken.length >= focused.end), structural = parent ? [{ start: parent.openIdx, end: parent.closeIdx + parent.closeToken.length, active: true, role: 'structure' as const }] : [];
+		if (structural.length) { applyStructuralSelectionMode(editor, { ...mode, spans: structural, focused: 0, stage: 'structure' }); return true; }
+	}
+	const ancestor = mode.ancestors?.at(-1);
+	if (!ancestor) { return true; }
+	applyStructuralSelectionMode(editor, restoreStructuralLevel(mode, ancestor, mode.ancestors?.slice(0, -1) ?? []));
+	return true;
+};
+const returnToPeerInnerSelection = (editor: vscode.TextEditor): boolean => {
+	const mode = structuralSelectionModes.get(editor), ancestor = mode?.ancestors?.at(-1);
+	if (!mode || !ancestor) { return false; }
+	applyStructuralSelectionMode(editor, restoreStructuralLevel(mode, ancestor, mode.ancestors?.slice(0, -1) ?? []));
+	return enterNextStructuralStage(editor);
+};
+const activateStructuralSelection = (editor: vscode.TextEditor): boolean => {
+	const mode = structuralSelectionModes.get(editor);
+	if (!mode) { return false; }
+	if (mode.typing) { applyStructuralSelectionMode(editor, { ...mode, typing: false }); return true; }
+	if (mode.stage === 'structure' && !mode.ancestors?.length) { return enterNextStructuralStage(editor); }
+	if (mode.stage === 'components' && mode.spans[mode.focused]?.role === 'structure') { return returnToPeerInnerSelection(editor); }
+	if (mode.stage === 'inner' && mode.ancestors?.length) { return climbStructuralSelection(editor); }
+	if (drillIntoStructuralSelection(editor)) { return true; }
+	if (climbStructuralSelection(editor)) { return true; }
+	if (mode.spans.length > 1) { applyStructuralSelectionMode(editor, { ...mode, focused: (mode.focused + 1) % mode.spans.length }); return true; }
+	return exitStructuralSelectionMode(editor);
+};
+const cycleStructuralPeerSelection = (editor: vscode.TextEditor, direction: 1 | -1): boolean => {
+	const mode = structuralSelectionModes.get(editor);
+	if (!mode) { return false; }
+	if (mode.typing) { applyStructuralSelectionMode(editor, { ...mode, typing: false }); return true; }
+	if (mode.stage !== 'structure' || mode.spans.length < 2) { return false; }
+	applyStructuralSelectionMode(editor, { ...mode, focused: (mode.focused + direction + mode.spans.length) % mode.spans.length });
+	return true;
+};
+const cycleDerivedNestedPeerSelection = (editor: vscode.TextEditor, direction: 1 | -1): boolean => {
+	const mode = structuralSelectionModes.get(editor), focused = mode?.spans[mode.focused];
+	if (!mode || !focused || mode.stage !== 'structure' || mode.spans.length !== 1) { return false; }
+	index(editor.document);
+	const shadow = states.get(keyOf(editor.document))!.shadow, text = editor.document.getText(), current = shadow.pairs.find(pair => pair.type === 'tag' && pair.openIdx === focused.start && pair.closeIdx + pair.closeToken.length === focused.end);
+	if (!current) { return false; }
+	const parent = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx < current.openIdx && current.closeIdx + current.closeToken.length < pair.closeIdx + pair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0], container = parent && shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx < parent.openIdx && parent.closeIdx + parent.closeToken.length < pair.closeIdx + pair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0];
+	if (!parent || !container) { return false; }
+	const directChild = (owner: TokenPair, name: string): TokenPair | undefined => {
+		const candidates = shadow.pairs.filter(pair => pair.type === 'tag' && owner.openIdx < pair.openIdx && pair.closeIdx + pair.closeToken.length < owner.closeIdx + owner.closeToken.length);
+		return candidates.filter(candidate => !candidates.some(ancestor => ancestor !== candidate && ancestor.openIdx < candidate.openIdx && candidate.closeIdx + candidate.closeToken.length < ancestor.closeIdx + ancestor.closeToken.length)).find(candidate => tagNameAt(text, candidate.openIdx)?.name === name);
+	};
+	const parentName = tagNameAt(text, parent.openIdx)?.name, childName = tagNameAt(text, current.openIdx)?.name, containerName = tagNameAt(text, container.openIdx)?.name;
+	if (!parentName || !childName || !containerName) { return false; }
+	const peers = shadow.pairs.filter(pair => pair.type === 'tag' && tagNameAt(text, pair.openIdx)?.name === containerName).flatMap(owner => {
+		const peerParent = directChild(owner, parentName), peerChild = peerParent && directChild(peerParent, childName);
+		return peerChild ? [{ start: peerChild.openIdx, end: peerChild.closeIdx + peerChild.closeToken.length, active: true, role: 'structure' as const }] : [];
+	});
+	const currentIndex = peers.findIndex(span => span.start === current.openIdx && span.end === current.closeIdx + current.closeToken.length);
+	if (peers.length < 2 || currentIndex < 0) { return false; }
+	applyStructuralSelectionMode(editor, { ...mode, spans: peers, focused: (currentIndex + direction + peers.length) % peers.length });
+	return true;
+};
+const cycleInnerContentSelection = (editor: vscode.TextEditor, direction: 1 | -1): boolean => {
+	const mode = structuralSelectionModes.get(editor);
+	if (!mode || mode.typing || mode.stage !== 'inner') { return false; }
+	const ancestor = mode.ancestors?.at(-1);
+	if (!ancestor || !ancestor.spans.length) { return false; }
+	const nextFocused = (ancestor.focused + direction + ancestor.spans.length) % ancestor.spans.length;
+	applyStructuralSelectionMode(editor, { ...restoreStructuralLevel(mode, ancestor, mode.ancestors?.slice(0, -1) ?? []), focused: nextFocused });
+	return enterNextStructuralStage(editor);
+};
+const fallbackSiblingCycleAncestor = (editor: vscode.TextEditor, focused: StructuralSelectionSpan): StructuralSelectionLevel | undefined => {
+	index(editor.document);
+	const shadow = states.get(keyOf(editor.document))?.shadow, text = editor.document.getText();
+	if (!shadow) { return undefined; }
+	const parent = shadow.pairs.filter(pair => (pair.type === 'brace' || pair.type === 'tag') && pair.openIdx < focused.start && pair.closeIdx + pair.closeToken.length >= focused.end).sort((left, right) => right.openIdx - left.openIdx)[0];
+	if (!parent || parent.type !== 'tag') { return undefined; }
+	const name = tagNameAt(text, parent.openIdx)?.name;
+	if (!name) { return undefined; }
+	const spans = shadow.pairs.filter(pair => pair.type === 'tag' && tagNameAt(text, pair.openIdx)?.name === name).map(pair => ({ start: pair.openIdx, end: pair.closeIdx + pair.closeToken.length, active: true, role: 'structure' as const })).sort((left, right) => left.start - right.start);
+	if (spans.length < 2) { return undefined; }
+	const current = spans.findIndex(span => span.start === parent.openIdx && span.end === parent.closeIdx + parent.closeToken.length);
+	return { scope: { start: parent.openIdx, end: parent.closeIdx + parent.closeToken.length }, spans, focused: current >= 0 ? current : 0, stage: 'structure' };
+};
+const exitStructuralSelectionMode = (editor: vscode.TextEditor): boolean => {
+	if (!structuralSelectionModes.has(editor)) { return false; }
+	if (structuralSelectionModes.get(editor)?.typing) { applyStructuralSelectionMode(editor, { ...structuralSelectionModes.get(editor)!, typing: false }); return true; }
+	structuralSelectionModes.delete(editor);
+	renderStructuralSelectionMode(editor, undefined);
+	void vscode.commands.executeCommand('setContext', 'syntaxstitch.structuralSelectionMode', false);
+	void vscode.commands.executeCommand('setContext', 'syntaxstitch.structuralSelectionTyping', false);
+	return true;
+};
+const expandStructuralSelectionMode = (editor: vscode.TextEditor, direction: 1 | -1): boolean => {
+	const mode = structuralSelectionModes.get(editor);
+	if (!mode) { return false; }
+	const focused = mode.spans[mode.focused];
+	if (direction < 0 && focused?.role === 'structure') {
+		index(editor.document);
+		const text = editor.document.getText(), shadow = states.get(keyOf(editor.document))!.shadow, owner = shadow.pairs.find(pair => pair.type === 'tag' && pair.openIdx === focused.start && pair.closeIdx + pair.closeToken.length === focused.end);
+		if (owner) {
+			const components = tagComponents(editor, { start: owner.openIdx, end: owner.closeIdx + owner.closeToken.length, active: true, role: 'structure' }), property = components.filter(component => component.role === 'property').at(-1);
+			if (property) {
+				const propertyIndex = components.indexOf(property), value = components.slice(propertyIndex + 1).find(component => component.role === 'value'), end = value ? value.end + ((text[value.start - 1] === '"' || text[value.start - 1] === "'") && text[value.end] === text[value.start - 1] ? 1 : 0) : property.end;
+				applyStructuralSelectionMode(editor, { ...mode, spans: [{ start: property.start, end, active: true, role: 'attribute', attributeName: text.slice(property.start, property.end).toLowerCase() }], focused: 0, stage: 'components' });
+				return true;
+			}
+		}
+	}
+	if (direction < 0 && focused?.role === 'value') {
+		index(editor.document);
+		const text = editor.document.getText(), shadow = states.get(keyOf(editor.document))!.shadow, owner = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx <= focused.start && focused.end <= pair.closeIdx + pair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0];
+		if (owner) {
+			const components = tagComponents(editor, { start: owner.openIdx, end: owner.closeIdx + owner.closeToken.length, active: true, role: 'structure' }), valueIndex = components.findIndex(component => component.role === 'value' && component.start === focused.start && component.end === focused.end), property = components.slice(0, valueIndex).filter(component => component.role === 'property').at(-1);
+			if (property) {
+				const end = focused.end + ((text[focused.start - 1] === '"' || text[focused.start - 1] === "'") && text[focused.end] === text[focused.start - 1] ? 1 : 0);
+				applyStructuralSelectionMode(editor, { ...mode, spans: mode.spans.map((span, index) => index === mode.focused ? { ...span, start: property.start, end, role: 'attribute', attributeName: text.slice(property.start, property.end).toLowerCase() } : span) });
+				return true;
+			}
+		}
+	}
+	if (direction > 0 && focused?.role === 'property') {
+		index(editor.document);
+		const text = editor.document.getText(), shadow = states.get(keyOf(editor.document))!.shadow, owner = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx <= focused.start && focused.end <= pair.closeIdx + pair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0];
+		if (owner) {
+			const components = tagComponents(editor, { start: owner.openIdx, end: owner.closeIdx + owner.closeToken.length, active: true, role: 'structure' }), propertyIndex = components.findIndex(component => component.role === 'property' && component.start === focused.start && component.end === focused.end), value = propertyIndex >= 0 ? components.slice(propertyIndex + 1).find(component => component.role === 'value') : undefined, end = value ? value.end + ((text[value.start - 1] === '"' || text[value.start - 1] === "'") && text[value.end] === text[value.start - 1] ? 1 : 0) : focused.end;
+			applyStructuralSelectionMode(editor, { ...mode, spans: mode.spans.map((span, index) => index === mode.focused ? { ...span, end, role: 'attribute', attributeName: text.slice(focused.start, focused.end).toLowerCase() } : span) });
+			return true;
+		}
+	}
+	if (focused?.role === 'attribute' && focused.attributeName) {
+		index(editor.document);
+		const text = editor.document.getText(), shadow = states.get(keyOf(editor.document))!.shadow, owner = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx <= focused.start && focused.end <= pair.closeIdx + pair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0];
+		if (owner) {
+			const components = tagComponents(editor, { start: owner.openIdx, end: owner.closeIdx + owner.closeToken.length, active: true, role: 'structure' }), properties = components.filter(component => component.role === 'property'), currentIndex = properties.findIndex(property => text.slice(property.start, property.end).toLowerCase() === focused.attributeName), targetProperty = properties[currentIndex + direction];
+			if (!targetProperty) { return true; }
+			const targetName = text.slice(targetProperty.start, targetProperty.end).toLowerCase(), clauses = shadow.pairs.filter(pair => pair.type === 'tag' && tagNameAt(text, pair.openIdx)?.name === tagNameAt(text, owner.openIdx)?.name).flatMap(pair => {
+				const peerComponents = tagComponents(editor, { start: pair.openIdx, end: pair.closeIdx + pair.closeToken.length, active: true, role: 'structure' }), propertyIndex = peerComponents.findIndex(property => property.role === 'property' && text.slice(property.start, property.end).toLowerCase() === targetName);
+				if (propertyIndex < 0) { return []; }
+				const property = peerComponents[propertyIndex], value = peerComponents.slice(propertyIndex + 1).find(component => component.role === 'value'), end = value ? value.end + ((text[value.start - 1] === '"' || text[value.start - 1] === "'") && text[value.end] === text[value.start - 1] ? 1 : 0) : property.end;
+				return [{ start: property.start, end, active: true, role: 'attribute' as const, attributeName: targetName }];
+			});
+			const uniqueClauses = clauses.filter(clause => !mode.spans.some(span => span.start === clause.start && span.end === clause.end)), currentClause = clauses.find(clause => clause.start === targetProperty.start);
+			if (!currentClause) { return true; }
+			const spans = direction > 0 ? [...mode.spans, ...uniqueClauses] : [...uniqueClauses, ...mode.spans];
+			const focusedIndex = direction > 0 ? spans.findIndex(span => span.start === currentClause.start && span.end === currentClause.end) : spans.findIndex(span => span.start === focused.start && span.end === focused.end);
+			applyStructuralSelectionMode(editor, { ...mode, spans, focused: focusedIndex < 0 ? mode.focused : focusedIndex });
+			return true;
+		}
+	}
+	index(editor.document);
+	const spans = states.get(keyOf(editor.document))!.shadow.innerSelectionSpans(mode.scope.start, mode.scope.end), candidates = spans.filter(span => !mode.spans.some(current => current.start === span.start && current.end === span.end));
+	if (!candidates.length) { return true; }
+	const next = direction > 0 ? candidates.find(span => span.start >= mode.spans.at(-1)!.start) ?? candidates[0] : [...candidates].reverse().find(span => span.end <= mode.spans[0].end) ?? candidates.at(-1)!;
+	const nextSpan = { ...next, active: true, role: 'structure' as const };
+	applyStructuralSelectionMode(editor, { ...mode, spans: direction > 0 ? [...mode.spans, nextSpan] : [nextSpan, ...mode.spans], focused: direction > 0 ? mode.spans.length : 0 });
+	return true;
+};
+const enterStructuralSelectionMode = (editor: vscode.TextEditor): boolean => {
+	if (!editor || editor.selections.length !== 1 || editor.selection.isEmpty) { return false; }
+	index(editor.document);
+	const start = editor.document.offsetAt(editor.selection.start), end = editor.document.offsetAt(editor.selection.end), shadow = states.get(keyOf(editor.document))!.shadow, candidates = shadow.pairs
+		.filter(pair => (pair.type === 'brace' || pair.type === 'tag') && start <= pair.openIdx && pair.closeIdx + pair.closeToken.length <= end), selected = candidates
+		.filter(pair => !candidates.some(parent => parent !== pair && parent.openIdx <= pair.openIdx && pair.closeIdx + pair.closeToken.length <= parent.closeIdx + parent.closeToken.length))
+		.map(pair => ({ start: pair.openIdx, end: pair.closeIdx + pair.closeToken.length, active: true, role: 'structure' as const }));
+	if (!selected.length) { return false; }
+	applyStructuralSelectionMode(editor, { scope: { start, end }, spans: selected, focused: 0, stage: 'structure', ancestors: [] });
+	return true;
+};
+const cssComponents = (editor: vscode.TextEditor, span: StructuralSelectionSpan): StructuralSelectionSpan[] => {
+	const text = editor.document.getText().slice(span.start, span.end), components: StructuralSelectionSpan[] = [];
+	for (const match of text.matchAll(/([\w-]+)\s*:\s*([^;{}]+)(;|$)/g)) {
+		const propertyStart = span.start + match.index! + match[0].indexOf(match[1]);
+		const valueStart = span.start + match.index! + match[0].indexOf(match[2]);
+		components.push({ start: propertyStart, end: propertyStart + match[1].length, active: true, role: 'property' }, { start: valueStart, end: valueStart + match[2].trim().length, active: true, role: 'value' });
+		let partOffset = valueStart;
+		for (const part of match[2].trim().split(/\s+/)) { partOffset = editor.document.getText().indexOf(part, partOffset); components.push({ start: partOffset, end: partOffset + part.length, active: true, role: 'value-part' }); partOffset += part.length; }
+	}
+	return components;
+};
+const tagComponents = (editor: vscode.TextEditor, span: StructuralSelectionSpan): StructuralSelectionSpan[] => {
+	const text = editor.document.getText().slice(span.start, span.end), components: StructuralSelectionSpan[] = [], tagEnd = text.indexOf('>');
+	if (tagEnd < 0 || text.startsWith('</')) { return components; }
+	const head = text.slice(1, tagEnd), tagName = head.match(/^[\w:.-]+/)?.[0] ?? '', attributes = head.slice(tagName.length);
+	for (const match of attributes.matchAll(/([\w:.-]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]+))?/g)) {
+		const propertyOffset = span.start + 1 + tagName.length + attributes.indexOf(match[0], match.index);
+		components.push({ start: propertyOffset + match[0].indexOf(match[1]), end: propertyOffset + match[0].indexOf(match[1]) + match[1].length, active: true, role: 'property' });
+		if (match[2]) { const rawValueOffset = propertyOffset + match[0].indexOf(match[2]), quoted = (match[2].startsWith('"') && match[2].endsWith('"')) || (match[2].startsWith("'") && match[2].endsWith("'")), valueOffset = rawValueOffset + (quoted ? 1 : 0), valueLength = match[2].length - (quoted ? 2 : 0); components.push({ start: valueOffset, end: valueOffset + valueLength, active: true, role: 'value' }); }
+	}
+	return components;
+};
+const structuralComponents = (editor: vscode.TextEditor, spans: StructuralSelectionSpan[]): StructuralSelectionSpan[] => spans.flatMap(span => {
+	if (span.role !== 'structure') { return []; }
+	const text = editor.document.getText().slice(span.start, span.end).trimStart();
+	return text.startsWith('<') ? tagComponents(editor, span) : cssComponents(editor, span);
+});
+const cyclePeerComponentSelection = (editor: vscode.TextEditor, direction: 1 | -1): boolean => {
+	const mode = structuralSelectionModes.get(editor), focused = mode?.spans[mode.focused], ancestor = mode?.ancestors?.at(-1);
+	if (!mode || !focused || !ancestor || mode.stage !== 'components' || (focused.role !== 'property' && focused.role !== 'value' && focused.role !== 'attribute')) { return false; }
+	index(editor.document);
+	const shadow = states.get(keyOf(editor.document))!.shadow, text = editor.document.getText(), current = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx <= focused.start && focused.end <= pair.closeIdx + pair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0], currentIndex = ancestor.spans.findIndex(span => current && span.start <= current.openIdx && current.closeIdx + current.closeToken.length <= span.end);
+	if (!current || currentIndex < 0) { return false; }
+	const currentName = tagNameAt(text, current.openIdx)?.name;
+	if (!currentName) { return false; }
+	const peerTag = (span: StructuralSelectionSpan): TokenPair | undefined => {
+		const exact = shadow.pairs.find(pair => pair.type === 'tag' && pair.openIdx === span.start && pair.closeIdx + pair.closeToken.length === span.end);
+		if (exact && tagNameAt(text, exact.openIdx)?.name === currentName) { return exact; }
+		const candidates = shadow.pairs.filter(pair => pair.type === 'tag' && span.start < pair.openIdx && pair.closeIdx + pair.closeToken.length < span.end);
+		return candidates.filter(candidate => !candidates.some(parent => parent !== candidate && parent.openIdx < candidate.openIdx && candidate.closeIdx + candidate.closeToken.length < parent.closeIdx + parent.closeToken.length)).find(candidate => tagNameAt(text, candidate.openIdx)?.name === currentName);
+	};
+	const currentComponents = tagComponents(editor, { start: current.openIdx, end: current.closeIdx + current.closeToken.length, active: true, role: 'structure' }), currentComponentIndex = currentComponents.findIndex(component => component.role === focused.role && component.start === focused.start && component.end === focused.end), property = focused.role === 'attribute' ? currentComponents.find(component => component.role === 'property' && text.slice(component.start, component.end).toLowerCase() === focused.attributeName) : currentComponents.slice(0, currentComponentIndex + 1).filter(component => component.role === 'property').at(-1);
+	if (!property) { return false; }
+	const key = text.slice(property.start, property.end).toLowerCase(), valueText = focused.role === 'value' ? text.slice(focused.start, focused.end) : undefined;
+	for (let step = 1; step <= ancestor.spans.length; step++) {
+		const peerIndex = (currentIndex + direction * step + ancestor.spans.length) % ancestor.spans.length, peer = peerTag(ancestor.spans[peerIndex]);
+		if (!peer) { continue; }
+		const peerComponents = tagComponents(editor, { start: peer.openIdx, end: peer.closeIdx + peer.closeToken.length, active: true, role: 'structure' }), peerPropertyIndex = peerComponents.findIndex(component => component.role === 'property' && text.slice(component.start, component.end).toLowerCase() === key), peerValue = peerComponents.slice(peerPropertyIndex + 1).find(component => component.role === 'value'), peerComponent = focused.role === 'property' ? peerComponents[peerPropertyIndex] : focused.role === 'attribute' && peerPropertyIndex >= 0 ? { start: peerComponents[peerPropertyIndex].start, end: peerValue ? peerValue.end + ((text[peerValue.start - 1] === '"' || text[peerValue.start - 1] === "'") && text[peerValue.end] === text[peerValue.start - 1] ? 1 : 0) : peerComponents[peerPropertyIndex].end, active: true, role: 'attribute' as const, attributeName: key } : peerValue;
+		if (!peerComponent || (valueText !== undefined && text.slice(peerComponent.start, peerComponent.end) !== valueText)) { continue; }
+		const spans = focused.role === 'attribute' ? [...peerComponents, peerComponent] : peerComponents;
+		applyStructuralSelectionMode(editor, { ...mode, spans, focused: spans.indexOf(peerComponent), ancestors: [...(mode.ancestors ?? []).slice(0, -1), { ...ancestor, focused: peerIndex }] });
+		return true;
+	}
+	return false;
+};
+const cycleDerivedComponentPeerSelection = (editor: vscode.TextEditor, direction: 1 | -1): boolean => {
+	const mode = structuralSelectionModes.get(editor), focused = mode?.spans[mode.focused];
+	if (!mode || !focused || mode.stage !== 'components' || (focused.role !== 'property' && focused.role !== 'value' && focused.role !== 'attribute')) { return false; }
+	index(editor.document);
+	const shadow = states.get(keyOf(editor.document))!.shadow, text = editor.document.getText(), current = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx <= focused.start && focused.end <= pair.closeIdx + pair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0];
+	if (!current) { return false; }
+	const currentName = tagNameAt(text, current.openIdx)?.name, parent = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx < current.openIdx && current.closeIdx + current.closeToken.length < pair.closeIdx + pair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0], parentName = parent && tagNameAt(text, parent.openIdx)?.name;
+	if (!currentName) { return false; }
+	const peers = shadow.pairs.filter(pair => pair.type === 'tag' && tagNameAt(text, pair.openIdx)?.name === currentName).filter(pair => {
+		const candidateParent = shadow.pairs.filter(parentPair => parentPair.type === 'tag' && parentPair.openIdx < pair.openIdx && pair.closeIdx + pair.closeToken.length < parentPair.closeIdx + parentPair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0];
+		return tagNameAt(text, candidateParent?.openIdx ?? -1)?.name === parentName;
+	}).sort((left, right) => left.openIdx - right.openIdx), currentIndex = peers.findIndex(peer => peer.openIdx === current.openIdx && peer.closeIdx === current.closeIdx);
+	if (currentIndex < 0) { return false; }
+	const currentComponents = tagComponents(editor, { start: current.openIdx, end: current.closeIdx + current.closeToken.length, active: true, role: 'structure' }), componentIndex = currentComponents.findIndex(component => component.role === focused.role && component.start === focused.start && component.end === focused.end), property = focused.role === 'attribute' ? currentComponents.find(component => component.role === 'property' && text.slice(component.start, component.end).toLowerCase() === focused.attributeName) : currentComponents.slice(0, componentIndex + 1).filter(component => component.role === 'property').at(-1);
+	if (!property) { return false; }
+	const key = text.slice(property.start, property.end).toLowerCase(), valueText = focused.role === 'value' ? text.slice(focused.start, focused.end) : undefined;
+	for (let step = 1; step <= peers.length; step++) {
+		const peer = peers[(currentIndex + direction * step + peers.length) % peers.length], components = tagComponents(editor, { start: peer.openIdx, end: peer.closeIdx + peer.closeToken.length, active: true, role: 'structure' }), propertyIndex = components.findIndex(component => component.role === 'property' && text.slice(component.start, component.end).toLowerCase() === key), value = components.slice(propertyIndex + 1).find(candidate => candidate.role === 'value'), component = focused.role === 'property' ? components[propertyIndex] : focused.role === 'attribute' && propertyIndex >= 0 ? { start: components[propertyIndex].start, end: value ? value.end + ((text[value.start - 1] === '"' || text[value.start - 1] === "'") && text[value.end] === text[value.start - 1] ? 1 : 0) : components[propertyIndex].end, active: true, role: 'attribute' as const, attributeName: key } : value;
+		if (!component || (valueText !== undefined && text.slice(component.start, component.end) !== valueText)) { continue; }
+		const spans = focused.role === 'attribute' ? [...components, component] : components;
+		applyStructuralSelectionMode(editor, { ...mode, spans, focused: spans.indexOf(component) });
+		return true;
+	}
+	return false;
+};
+const descendFromComponentSelection = (editor: vscode.TextEditor): boolean => {
+	const mode = structuralSelectionModes.get(editor), focused = mode?.spans[mode.focused];
+	if (!mode || !focused || mode.stage !== 'components') { return false; }
+	index(editor.document);
+	const shadow = states.get(keyOf(editor.document))!.shadow, owner = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx <= focused.start && focused.end <= pair.closeIdx + pair.closeToken.length).sort((left, right) => right.openIdx - left.openIdx)[0];
+	if (!owner) { return false; }
+	const children = shadow.pairs.filter(pair => (pair.type === 'brace' || pair.type === 'tag') && owner.openIdx < pair.openIdx && pair.closeIdx + pair.closeToken.length < owner.closeIdx + owner.closeToken.length);
+	const directChildren = children.filter(child => !children.some(parent => parent !== child && parent.openIdx < child.openIdx && child.closeIdx + child.closeToken.length < parent.closeIdx + parent.closeToken.length)).map(pair => ({ start: pair.openIdx, end: pair.closeIdx + pair.closeToken.length, active: true, role: 'structure' as const }));
+	if (!directChildren.length) { return false; }
+	applyStructuralSelectionMode(editor, { ...mode, ancestors: [...(mode.ancestors ?? []), levelOf(mode)], scope: { start: owner.openIdx, end: owner.closeIdx + owner.closeToken.length }, spans: directChildren, focused: 0, stage: 'structure' });
+	return true;
+};
+const reverseComponentToAncestor = (editor: vscode.TextEditor): boolean => {
+	const mode = structuralSelectionModes.get(editor), focused = mode?.spans[mode.focused], ancestor = mode?.ancestors?.at(-1);
+	const firstProperty = mode?.spans.findIndex(span => span.role === 'property') ?? -1;
+	if (!mode || !focused || !ancestor || mode.stage !== 'components' || focused.role !== 'property' || mode.focused !== firstProperty || ancestor.stage !== 'components' || !ancestor.spans.length) { return false; }
+	applyStructuralSelectionMode(editor, restoreStructuralLevel(mode, { ...ancestor, focused: ancestor.spans.length - 1 }, mode.ancestors?.slice(0, -1) ?? []));
+	return true;
+};
+const matchingPeerChildSpans = (shadow: ShadowStructure, text: string, parentSpans: readonly StructuralSelectionSpan[], focused: StructuralSelectionSpan): StructuralSelectionSpan[] => {
+	const parent = shadow.pairs.find(pair => pair.type === 'tag' && pair.openIdx === focused.start && pair.closeIdx + pair.closeToken.length === focused.end), parentName = parent && tagNameAt(text, parent.openIdx)?.name;
+	if (!parentName) { return []; }
+	const peers = parentSpans.filter(span => span.active && span.highlighted !== false).map(span => shadow.pairs.find(pair => pair.type === 'tag' && pair.openIdx === span.start && pair.closeIdx + pair.closeToken.length === span.end)).filter((pair): pair is TokenPair => !!pair && tagNameAt(text, pair.openIdx)?.name === parentName);
+	return peers.flatMap(peer => {
+		const candidates = shadow.pairs.filter(candidate => (candidate.type === 'brace' || candidate.type === 'tag') && peer.openIdx < candidate.openIdx && candidate.closeIdx + candidate.closeToken.length < peer.closeIdx + peer.closeToken.length);
+		return candidates.filter(candidate => !candidates.some(parentCandidate => parentCandidate !== candidate && parentCandidate.openIdx < candidate.openIdx && candidate.closeIdx + candidate.closeToken.length < parentCandidate.closeIdx + parentCandidate.closeToken.length)).map(candidate => ({ start: candidate.openIdx, end: candidate.closeIdx + candidate.closeToken.length, active: true, role: 'structure' as const }));
+	});
+};
+const enterNextStructuralStage = (editor: vscode.TextEditor, preferComponents = true): boolean => {
+	const mode = structuralSelectionModes.get(editor);
+	if (!mode) { return false; }
+	index(editor.document);
+	const shadow = states.get(keyOf(editor.document))!.shadow, text = editor.document.getText(), activeSpans = mode.spans.filter(span => span.active);
+	if (mode.stage === 'structure') {
+		const focused = mode.spans[mode.focused], children = focused?.active ? matchingPeerChildSpans(shadow, text, mode.spans, focused) : [];
+		const components = focused ? structuralComponents(editor, [focused]) : [];
+		if (preferComponents && children.length && components.length) {
+			const focusedComponent = Math.max(0, components.findIndex(component => component.role === 'property'));
+			applyStructuralSelectionMode(editor, { ...mode, spans: components, focused: focusedComponent, stage: 'components' });
+			return true;
+		}
+		if (children.length) {
+			const focusedChild = focused ? children.findIndex(span => focused.start < span.start && span.end < focused.end) : -1;
+			const ancestors = mode.spans.length > 1 ? [...(mode.ancestors ?? []), levelOf(mode)] : mode.ancestors;
+			applyStructuralSelectionMode(editor, { ...mode, ancestors, scope: focused ? { start: focused.start, end: focused.end } : mode.scope, spans: children, focused: focusedChild < 0 ? 0 : focusedChild, stage: 'structure' });
+			return true;
+		}
+		const inner: StructuralSelectionSpan[] = [];
+		if (!inner.length) {
+			const parent = focused && shadow.pairs.find(pair => pair.openIdx === focused.start && pair.closeIdx + pair.closeToken.length === focused.end);
+			if (parent && parent.closeIdx > parent.openIdx + parent.openToken.length) { inner.push({ start: parent.openIdx + parent.openToken.length, end: parent.closeIdx, active: true, role: 'structure' }); }
+		}
+		if (!inner.length && mode.spans.length > 1) { applyStructuralSelectionMode(editor, { ...mode, focused: (mode.focused + 1) % mode.spans.length }); return true; }
+		if (!inner.length) { return false; }
+		const focusedInner = focused ? inner.findIndex(span => focused.start <= span.start && span.end <= focused.end) : -1;
+		const ancestors = mode.spans.length > 1 ? [...(mode.ancestors ?? []), levelOf(mode)] : mode.ancestors;
+		applyStructuralSelectionMode(editor, { ...mode, ancestors, scope: focused ? { start: focused.start, end: focused.end } : mode.scope, spans: inner, focused: focusedInner < 0 ? 0 : focusedInner, stage: 'inner' });
+		return true;
+	}
+	if (mode.stage === 'inner') {
+		const selectedOffset = editor.document.offsetAt(editor.selection.active), selectedParent = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx < selectedOffset && selectedOffset <= pair.closeIdx).sort((left, right) => right.openIdx - left.openIdx)[0], selectedInner = selectedParent && shadow.innerSelectionSpans(selectedParent.openIdx, selectedParent.closeIdx + selectedParent.closeToken.length).find(span => span.start <= selectedOffset && selectedOffset <= span.end), focusedSpan = selectedInner ? { ...selectedInner, active: true, role: 'structure' as const } : mode.spans[mode.focused], parent = focusedSpan && shadow.pairs.filter(pair => pair.openIdx < focusedSpan.start && pair.closeIdx + pair.closeToken.length >= focusedSpan.end).sort((left, right) => right.openIdx - left.openIdx)[0], parentSpans = parent ? [{ start: parent.openIdx, end: parent.closeIdx + parent.closeToken.length, active: true, role: 'structure' as const }] : [], components = focusedSpan ? [focusedSpan, ...structuralComponents(editor, parentSpans)] : [];
+		if (!components.length) {
+			if (mode.ancestors?.length) { return cycleInnerContentSelection(editor, 1); }
+			if (focusedSpan) {
+				const fallback = fallbackSiblingCycleAncestor(editor, focusedSpan);
+				if (fallback) {
+					applyStructuralSelectionMode(editor, { ...mode, ancestors: [...(mode.ancestors ?? []), fallback] });
+					return cycleInnerContentSelection(editor, 1);
+				}
+			}
+			return false;
+		}
+		const focused = Math.max(0, components.findIndex(component => component.role === 'property'));
+		applyStructuralSelectionMode(editor, { ...mode, spans: components, focused: focused < 0 ? 0 : focused, stage: 'components' });
+		return true;
+	}
+	if (mode.stage === 'components') {
+		if (mode.spans.length > 1) {
+			applyStructuralSelectionMode(editor, { ...mode, focused: (mode.focused + 1) % mode.spans.length });
+			return true;
+		}
+		const before = snapshotSelections(editor);
+		if (!climbStructuralSelection(editor)) { return false; }
+		return selectionsMatch(before, snapshotSelections(editor)) ? climbStructuralSelection(editor) : true;
+	}
+	return true;
+};
+const changeStructuralStage = (editor: vscode.TextEditor, direction: 1 | -1): boolean => {
+	const mode = structuralSelectionModes.get(editor);
+	if (!mode) { return false; }
+	if (mode.typing) { applyStructuralSelectionMode(editor, { ...mode, typing: false }); return true; }
+	if (direction > 0) { return enterNextStructuralStage(editor); }
+	if (mode.stage === 'components') {
+		if (mode.spans.length > 1) {
+			applyStructuralSelectionMode(editor, { ...mode, focused: (mode.focused - 1 + mode.spans.length) % mode.spans.length });
+			return true;
+		}
+		const focused = mode.spans[mode.focused], parent = focused && states.get(keyOf(editor.document))!.shadow.pairs.find(pair => (pair.type === 'brace' || pair.type === 'tag') && pair.openIdx <= focused.start && pair.closeIdx + pair.closeToken.length >= focused.end), inner = parent ? [{ start: parent.openIdx + parent.openToken.length, end: parent.closeIdx, active: true, role: 'structure' as const }] : [];
+		if (inner.length) { applyStructuralSelectionMode(editor, { ...mode, spans: inner, focused: 0, stage: 'inner' }); return true; }
+		return false;
+	}
+	if (mode.stage === 'inner') {
+		const focused = mode.spans[mode.focused], parent = focused && states.get(keyOf(editor.document))!.shadow.pairs.find(pair => pair.openIdx < focused.start && pair.closeIdx + pair.closeToken.length >= focused.end), structural = parent ? [{ start: parent.openIdx, end: parent.closeIdx + parent.closeToken.length, active: true, role: 'structure' as const }] : [];
+		applyStructuralSelectionMode(editor, { ...mode, spans: structural, focused: 0, stage: 'structure' });
+		return true;
+	}
+	if (mode.stage === 'structure') {
+		const focused = mode.spans[mode.focused], components = focused ? structuralComponents(editor, [focused]) : [];
+		if (components.length) { applyStructuralSelectionMode(editor, { ...mode, spans: components, focused: components.length - 1, stage: 'components' }); }
+		return true;
+	}
+	return true;
+};
+const rebaseStructuralSelectionMode = (editor: vscode.TextEditor, change: vscode.TextDocumentContentChangeEvent, internal = false): void => {
+	const mode = structuralSelectionModes.get(editor);
+	if (!mode) { return; }
+	const delta = change.text.length - change.rangeLength, oldEnd = change.rangeOffset + change.rangeLength;
+	const focused = mode.spans[mode.focused], typedInsideFocused = !internal && !!focused && change.text.length > 0 && (mode.typing || change.rangeOffset >= focused.start && change.rangeOffset <= focused.end);
+	if (typedInsideFocused && !mode.typing) {
+		structuralSelectionModes.set(editor, { ...mode, typing: true });
+		void vscode.commands.executeCommand('setContext', 'syntaxstitch.structuralSelectionTyping', true);
+	}
+	const spans = mode.spans.map((span, index) => {
+		if (index === mode.focused && change.text.length > 0 && change.rangeOffset === span.end && change.rangeLength === 0) { return { ...span, end: span.end + change.text.length }; }
+		if (span.start >= oldEnd) { return { ...span, start: span.start + delta, end: span.end + delta }; }
+		if (span.end <= change.rangeOffset) { return span; }
+		if (index === mode.focused && !change.text && span.start >= change.rangeOffset && span.end <= oldEnd) { return { ...span, start: change.rangeOffset, end: change.rangeOffset }; }
+		return { ...span, end: Math.max(span.start, span.end + delta) };
+	});
+	const rebaseSpan = (span: SelectionSpan): SelectionSpan => span.start >= oldEnd ? { start: span.start + delta, end: span.end + delta } : span.end <= change.rangeOffset ? span : { start: span.start, end: Math.max(span.start, span.end + delta) };
+	const rebaseStructuralSpan = (span: StructuralSelectionSpan): StructuralSelectionSpan => ({ ...span, ...rebaseSpan(span) });
+	const ancestors = mode.ancestors?.map(level => ({ ...level, scope: rebaseSpan(level.scope), spans: level.spans.map(rebaseStructuralSpan) }));
+	applyStructuralSelectionMode(editor, { ...mode, scope: rebaseSpan(mode.scope), spans, ancestors, typing: typedInsideFocused || mode.typing });
+	if (typedInsideFocused) {
+		const caret = editor.document.positionAt(change.rangeOffset + change.text.length);
+		editor.selection = new vscode.Selection(caret, caret);
+	}
+};
+const propagateMatchingComponentEdit = async (editor: vscode.TextEditor, change: vscode.TextDocumentContentChangeEvent): Promise<boolean> => {
+	if (!documentHasOpenEditor(editor.document) || !editor.document.isDirty || !isEnabled(editor.document)) { return false; }
+	index(editor.document);
+	const documentText = editor.document.getText();
+	if (change.text === undefined || /\s/.test(change.text)) { return false; }
+	const shadow = states.get(keyOf(editor.document))!.shadow;
+	const mode = structuralSelectionModes.get(editor);
+	const focusedSpan = mode?.spans[mode.focused];
+	if (!focusedSpan || (focusedSpan.role !== 'property' && focusedSpan.role !== 'value' && focusedSpan.role !== 'attribute')) { return false; }
+	const disabledStructures = [mode, ...(mode?.ancestors ?? [])].flatMap(level => level.spans).filter(span => span.role === 'structure' && span.highlighted === false);
+	const isDisabled = (pair: TokenPair): boolean => disabledStructures.some(span => span.start === pair.openIdx && span.end === pair.closeIdx + pair.closeToken.length);
+	const currentPair = shadow.pairs.filter(pair => pair.type === 'tag').find(pair => pair.openIdx <= focusedSpan.start && focusedSpan.start < pair.closeIdx + pair.closeToken.length)
+		?? shadow.pairs.filter(pair => pair.type === 'tag').find(pair => pair.openIdx <= change.rangeOffset && change.rangeOffset < pair.closeIdx + pair.closeToken.length);
+	if (!currentPair) { return false; }
+	const currentTagName = tagNameAt(documentText, currentPair.openIdx)?.name;
+	if (!currentTagName) { return false; }
+	const tagSpan = { start: currentPair.openIdx, end: currentPair.closeIdx + currentPair.closeToken.length, active: true, role: 'structure' as const };
+	const currentComponents = tagComponents(editor, tagSpan);
+	if (focusedSpan.role === 'attribute') {
+		const key = focusedSpan.attributeName;
+		if (!key) { return false; }
+		const sourceText = documentText.slice(focusedSpan.start, focusedSpan.end), peers = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx !== currentPair.openIdx && !isDisabled(pair) && tagNameAt(documentText, pair.openIdx)?.name === currentTagName).flatMap(pair => {
+			const components = tagComponents(editor, { start: pair.openIdx, end: pair.closeIdx + pair.closeToken.length, active: true, role: 'structure' }), propertyIndex = components.findIndex(component => component.role === 'property' && documentText.slice(component.start, component.end).toLowerCase() === key), value = propertyIndex >= 0 ? components.slice(propertyIndex + 1).find(component => component.role === 'value') : undefined;
+			if (propertyIndex < 0) { return []; }
+			const end = value ? value.end + ((documentText[value.start - 1] === '"' || documentText[value.start - 1] === "'") && documentText[value.end] === documentText[value.start - 1] ? 1 : 0) : components[propertyIndex].end;
+			return [{ start: components[propertyIndex].start, end }];
+		});
+		if (!peers.length) { return false; }
+		repairing.add(keyOf(editor.document));
+		try {
+			const applied = await editor.edit(builder => peers.forEach(peer => builder.replace(new vscode.Range(editor.document.positionAt(peer.start), editor.document.positionAt(peer.end)), sourceText)), { undoStopBefore: false, undoStopAfter: false });
+			if (applied) { for (const peer of [...peers].sort((left, right) => right.start - left.start)) { rebaseStructuralSelectionMode(editor, { rangeOffset: peer.start, rangeLength: peer.end - peer.start, text: sourceText } as vscode.TextDocumentContentChangeEvent, true); } }
+			return applied;
+		} finally { repairing.delete(keyOf(editor.document)); }
+	}
+	const focusedComponentIndex = currentComponents.findIndex(component => component.role === focusedSpan.role && component.start <= focusedSpan.start && focusedSpan.start < component.end);
+	const sourceComponent = focusedComponentIndex >= 0 ? currentComponents[focusedComponentIndex] : undefined;
+	const focusedPropertyIndex = currentComponents.filter(component => component.role === 'property' && component.start < focusedSpan.start).length - 1;
+	if (focusedComponentIndex < 0 && (focusedSpan.role !== 'value' || focusedPropertyIndex < 0)) { return false; }
+	const sourceProperty = currentComponents.slice(0, focusedComponentIndex + 1).filter(component => component.role === 'property').at(-1), sourcePropertyName = sourceProperty ? documentText.slice(sourceProperty.start, sourceProperty.end) : '';
+	const sourceText = sourceComponent ? documentText.slice(sourceComponent.start, sourceComponent.end) : '';
+	const propertyIndex = focusedComponentIndex >= 0 ? currentComponents.slice(0, focusedComponentIndex + 1).filter(component => component.role === 'property').length - 1 : focusedPropertyIndex;
+	const peers = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx !== currentPair.openIdx && !isDisabled(pair) && tagNameAt(documentText, pair.openIdx)?.name === currentTagName).flatMap(pair => {
+		const siblingComponents = tagComponents(editor, { start: pair.openIdx, end: pair.closeIdx + pair.closeToken.length, active: true, role: 'structure' as const });
+		const properties = siblingComponents.filter(component => component.role === 'property'), property = focusedSpan.role === 'value' && sourcePropertyName ? properties.find(candidate => documentText.slice(candidate.start, candidate.end).toLowerCase() === sourcePropertyName.toLowerCase()) : properties[propertyIndex];
+		if (!property) { return []; }
+		if (focusedSpan.role === 'property') { return [property]; }
+		const propertyComponentIndex = siblingComponents.indexOf(property), peer = siblingComponents.slice(propertyComponentIndex + 1).find(component => component.role === 'value');
+		return peer ? [peer] : [];
+	});
+	if (!peers.length) { return false; }
+	const selections = snapshotSelections(editor), sourceCaret = editor.document.offsetAt(editor.selection.active), sourceEnd = editor.document.offsetAt(editor.selection.anchor);
+	repairing.add(keyOf(editor.document));
+	try {
+		const applied = await editor.edit(builder => {
+			for (const peer of peers) {
+				builder.replace(new vscode.Range(editor.document.positionAt(peer.start), editor.document.positionAt(peer.end)), sourceText);
+			}
+		}, { undoStopBefore: false, undoStopAfter: false });
+		if (applied && documentHasOpenEditor(editor.document)) {
+			for (const peer of [...peers].sort((left, right) => right.start - left.start)) {
+				rebaseStructuralSelectionMode(editor, { rangeOffset: peer.start, rangeLength: peer.end - peer.start, text: sourceText } as vscode.TextDocumentContentChangeEvent, true);
+			}
+			const shift = (offset: number): number => offset + peers.reduce((delta, peer) => peer.start < offset ? delta + sourceText.length - (peer.end - peer.start) : delta, 0);
+			const restored = selections.map(selection => ({ anchor: shift(selection.anchor), active: shift(selection.active) }));
+			restoreSelections(editor, restored);
+			const caret = editor.document.positionAt(shift(sourceCaret));
+			if (editor.selection.isEmpty || sourceCaret === sourceEnd) { editor.selection = new vscode.Selection(caret, caret); }
+		}
+		return applied;
+	} finally {
+		repairing.delete(keyOf(editor.document));
+	}
+};
+const propagateMatchingInnerTextEdit = async (editor: vscode.TextEditor, change: vscode.TextDocumentContentChangeEvent): Promise<boolean> => {
+	if (!documentHasOpenEditor(editor.document) || !editor.document.isDirty || !isEnabled(editor.document) || change.text === undefined) { return false; }
+	index(editor.document);
+	const mode = structuralSelectionModes.get(editor), focused = mode?.spans[mode.focused];
+	if (!mode || !focused || mode.stage !== 'inner') { return false; }
+	const shadow = states.get(keyOf(editor.document))!.shadow, text = editor.document.getText(), parent = shadow.pairs.filter(pair => pair.type === 'tag' && pair.openIdx < focused.start && pair.closeIdx + pair.closeToken.length >= focused.end).sort((left, right) => right.openIdx - left.openIdx)[0];
+	if (!parent) { return false; }
+	const parentName = tagNameAt(text, parent.openIdx)?.name, ancestor = mode.ancestors?.at(-1);
+	if (!parentName || !ancestor) { return false; }
+	const peers = ancestor.spans.filter(span => span.active && span.highlighted !== false).map(span => shadow.pairs.find(pair => pair.type === 'tag' && pair.openIdx === span.start && pair.closeIdx + pair.closeToken.length === span.end)).filter((pair): pair is TokenPair => !!pair && pair.openIdx !== parent.openIdx && tagNameAt(text, pair.openIdx)?.name === parentName);
+	const source = text.slice(focused.start, focused.end), targets = peers.flatMap(peer => {
+		const inner = shadow.innerSelectionSpans(peer.openIdx, peer.closeIdx + peer.closeToken.length);
+		return inner.length === 1 ? [inner[0]] : [];
+	});
+	if (!targets.length) { return false; }
+	repairing.add(keyOf(editor.document));
+	try {
+		const applied = await editor.edit(builder => targets.forEach(target => builder.replace(new vscode.Range(editor.document.positionAt(target.start), editor.document.positionAt(target.end)), source)), { undoStopBefore: false, undoStopAfter: false });
+		if (applied) {
+			for (const target of [...targets].sort((left, right) => right.start - left.start)) {
+				rebaseStructuralSelectionMode(editor, { rangeOffset: target.start, rangeLength: target.end - target.start, text: source } as vscode.TextDocumentContentChangeEvent, true);
+			}
+		}
+		return applied;
+	}
+	finally { repairing.delete(keyOf(editor.document)); }
+};
+const finalizeUniqueHtmlIdPropagation = async (editor: vscode.TextEditor, mode: StructuralSelectionMode): Promise<void> => {
+	if (!documentHasOpenEditor(editor.document) || !isEnabled(editor.document)) { return; }
+	const focused = mode.spans[mode.focused];
+	if (editor.document.languageId !== 'html' || focused?.role !== 'value') { return; }
+	index(editor.document);
+	const text = editor.document.getText(), shadow = states.get(keyOf(editor.document))!.shadow, target = focused.start, pair = shadow.pairs.filter(candidate => candidate.type === 'tag').find(candidate => candidate.openIdx <= target && target < candidate.closeIdx + candidate.closeToken.length);
+	if (!pair) { return; }
+	const name = tagNameAt(text, pair.openIdx)?.name;
+	if (!name) { return; }
+	const components = tagComponents(editor, { start: pair.openIdx, end: pair.closeIdx + pair.closeToken.length, active: true, role: 'structure' as const }), valueIndex = components.findIndex(component => component.role === 'value' && component.start <= target && target <= component.end);
+	if (valueIndex < 0) { return; }
+	const sourceProperty = components[valueIndex - 1];
+	if (sourceProperty?.role !== 'property' || text.slice(sourceProperty.start, sourceProperty.end).toLowerCase() !== 'id') { return; }
+	const disabledStructures = [mode, ...(mode.ancestors ?? [])].flatMap(level => level.spans).filter(span => span.role === 'structure' && span.highlighted === false), isDisabled = (candidate: TokenPair): boolean => disabledStructures.some(span => span.start === candidate.openIdx && span.end === candidate.closeIdx + candidate.closeToken.length);
+	const source = text.slice(components[valueIndex].start, components[valueIndex].end), participants = shadow.pairs.filter(candidate => candidate.type === 'tag' && !isDisabled(candidate) && tagNameAt(text, candidate.openIdx)?.name === name).sort((left, right) => left.openIdx - right.openIdx).flatMap(candidate => {
+		const peers = tagComponents(editor, { start: candidate.openIdx, end: candidate.closeIdx + candidate.closeToken.length, active: true, role: 'structure' as const }), propertyIndex = peers.findIndex(component => component.role === 'property' && text.slice(component.start, component.end).toLowerCase() === 'id'), value = propertyIndex >= 0 ? peers[propertyIndex + 1] : undefined;
+		return value?.role === 'value' ? [value] : [];
+	});
+	if (participants.length < 2) { return; }
+	repairing.add(keyOf(editor.document));
+	try { await editor.edit(builder => participants.forEach((participant, index) => builder.replace(new vscode.Range(editor.document.positionAt(participant.start), editor.document.positionAt(participant.end)), `${source}_${index + 1}`)), { undoStopBefore: false, undoStopAfter: false }); }
+	finally { repairing.delete(keyOf(editor.document)); }
+};
 class RepairCounter {
 	#statistics: RepairStatistics;
 	readonly #recent = new Map<string, number>();
@@ -35,12 +631,15 @@ class RepairCounter {
 		this.#store = vscode.workspace.workspaceFolders?.length ? context.workspaceState : context.globalState;
 		const stored = this.#store.get<RepairStatistics & LegacyRepairStatistics>(STATISTICS_KEY);
 		const byKind = stored?.byKind;
-		this.#statistics = { total: stored?.total ?? 0, byKind: { square: byKind?.square ?? 0, parenthesis: byKind?.parenthesis ?? 0, curly: byKind?.curly ?? 0, tag: byKind?.tag ?? stored?.byType?.tag ?? 0, quote: byKind?.quote ?? 0, indent: byKind?.indent ?? stored?.byType?.indent ?? 0 }, unclassified: stored?.unclassified ?? stored?.byType?.brace ?? 0, lastAt: stored?.lastAt, lastUri: stored?.lastUri, lastRepair: stored?.lastRepair };
+		const legacySource = stored?.bySource as Record<string, number> | undefined;
+		const byKindValue = { square: byKind?.square ?? 0, parenthesis: byKind?.parenthesis ?? 0, curly: byKind?.curly ?? 0, tag: byKind?.tag ?? stored?.byType?.tag ?? 0, quote: byKind?.quote ?? 0, indent: byKind?.indent ?? stored?.byType?.indent ?? 0 } satisfies Record<RepairKind, number>;
+		const byKindSource = Object.fromEntries(REPAIR_KINDS.map(kind => [kind, { direct: stored?.byKindSource?.[kind]?.direct ?? 0, indirect: stored?.byKindSource?.[kind]?.indirect ?? 0 }])) as Record<RepairKind, Record<RepairSource, number>>;
+		this.#statistics = { total: stored?.total ?? 0, byKind: byKindValue, bySource: { direct: legacySource?.direct ?? legacySource?.user ?? 0, indirect: legacySource?.indirect ?? legacySource?.external ?? 0 }, byKindSource, unclassified: stored?.unclassified ?? stored?.byType?.brace ?? 0, firstAt: stored?.firstAt ?? stored?.lastAt, lastAt: stored?.lastAt, lastUri: stored?.lastUri, lastRepair: stored?.lastRepair };
 	}
 
 	get statistics(): Readonly<RepairStatistics> { return this.#statistics; }
 
-	async record(patches: readonly RepairPatch[], uri: vscode.Uri, lastRepair: string): Promise<number> {
+	async record(patches: readonly RepairPatch[], uri: vscode.Uri, lastRepair: string, source: RepairSource): Promise<number> {
 		const now = Date.now(), cooldown = vscode.workspace.getConfiguration(CONFIG_SECTION, uri).get('repairCountCooldownMs', 5000);
 		const counted = patches.filter(patch => {
 			const key = `${uri}:${patch.pairId}:${patch.side}`, previous = this.#recent.get(key) ?? 0;
@@ -49,13 +648,18 @@ class RepairCounter {
 		});
 		if (!counted.length) { return 0; }
 		const byKind = { ...this.#statistics.byKind };
+		const bySource = { direct: 0, indirect: 0, ...this.#statistics.bySource };
+		const byKindSource = Object.fromEntries(REPAIR_KINDS.map(kind => [kind, { direct: 0, indirect: 0, ...this.#statistics.byKindSource?.[kind] }])) as Record<RepairKind, Record<RepairSource, number>>;
 		for (const patch of counted) { byKind[patch.kind]++; }
-		this.#statistics = { ...this.#statistics, total: this.#statistics.total + counted.length, byKind, lastAt: new Date().toISOString(), lastUri: uri.toString(), lastRepair };
+		bySource[source] += counted.length;
+		for (const patch of counted) { byKindSource[patch.kind][source]++; }
+		const firstAt = this.#statistics.firstAt ?? new Date().toISOString(), lastAt = new Date().toISOString();
+		this.#statistics = { ...this.#statistics, total: this.#statistics.total + counted.length, byKind, bySource, byKindSource, firstAt, lastAt, lastUri: uri.toString(), lastRepair };
 		await this.#store.update(STATISTICS_KEY, this.#statistics);
 		return counted.length;
 	}
 
-	async reset(): Promise<void> { this.#recent.clear(); this.#statistics = { total: 0, byKind: { square: 0, parenthesis: 0, curly: 0, tag: 0, quote: 0, indent: 0 }, unclassified: 0 }; await this.#store.update(STATISTICS_KEY, this.#statistics); }
+	async reset(): Promise<void> { this.#recent.clear(); this.#statistics = { total: 0, byKind: { square: 0, parenthesis: 0, curly: 0, tag: 0, quote: 0, indent: 0 }, bySource: { direct: 0, indirect: 0 }, byKindSource: Object.fromEntries(REPAIR_KINDS.map(kind => [kind, { direct: 0, indirect: 0 }])) as Record<RepairKind, Record<RepairSource, number>>, unclassified: 0 }; await this.#store.update(STATISTICS_KEY, this.#statistics); }
 }
 
 const keyOf = (document: vscode.TextDocument): string => document.uri.toString();
@@ -104,12 +708,31 @@ const planClosingIndentRepairs = (document: vscode.TextDocument, changes: readon
 		const actual = document.lineAt(close.line).text.slice(0, close.character);
 		if (actual.trim()) { return []; }
 		const expected = document.lineAt(open.line).text.match(/^[\t ]*/)?.[0] ?? '';
-		return actual === expected ? [] : [{ offset: document.offsetAt(new vscode.Position(close.line, 0)), deleteLength: actual.length, text: expected, pairId: pair.id, side: 'close' as const, blockType: 'indent' as const, kind: 'indent' as const }];
+		return actual === expected ? [] : [{ offset: document.offsetAt(new vscode.Position(close.line, 0)), deleteLength: actual.length, text: expected, pairId: pair.id, side: 'close' as const, blockType: 'indent' as const, kind: 'indent' as const, rule: 'align-closing-indent' }];
 	});
 };
+const timestampParts = (value: string): { date: string; time: string; milliseconds: number } => {
+	const date = new Date(value), pad = (part: number): string => String(part).padStart(2, '0');
+	return { date: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`, time: `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`, milliseconds: date.getTime() };
+};
+const repairPeriod = (firstAt?: string, lastAt?: string): string => {
+	if (!firstAt || !lastAt) { return 'Never'; }
+	const first = timestampParts(firstAt), last = timestampParts(lastAt), elapsed = Math.max(0, last.milliseconds - first.milliseconds), totalSeconds = Math.floor(elapsed / 1000), days = Math.floor(totalSeconds / 86400), hours = Math.floor(totalSeconds % 86400 / 3600), minutes = Math.floor(totalSeconds % 3600 / 60), seconds = totalSeconds % 60, duration = `${days ? `${days}d ` : ''}${hours ? `${hours}h ` : ''}${minutes ? `${minutes}m ` : ''}${seconds}s`.trim();
+	return `${first.date === last.date ? `${first.date} ${first.time} - ${last.time}` : `${first.date} ${first.time} - ${last.date} ${last.time}`} (${duration})`;
+};
+const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]!));
+const statisticsHtml = (statistics: Readonly<RepairStatistics>): string => {
+	const bySource = { direct: 0, indirect: 0, ...statistics.bySource }, byKindSource = Object.fromEntries(REPAIR_KINDS.map(kind => [kind, { direct: 0, indirect: 0, ...statistics.byKindSource?.[kind] }])) as Record<RepairKind, Record<RepairSource, number>>, labels: Record<RepairKind, string> = { square: 'Square brackets []', parenthesis: 'Parentheses ()', curly: 'Curly braces {}', tag: 'Tags', quote: 'Quotes', indent: 'Indentation \\tab' }, rows = REPAIR_KINDS.filter(kind => statistics.byKind[kind] > 0).map(kind => `<tr><td>${escapeHtml(labels[kind])}</td><td>${statistics.byKind[kind]}</td><td>${byKindSource[kind].direct}</td><td>${byKindSource[kind].indirect}</td></tr>`).join(''), lastRepair = statistics.lastRepair ? escapeHtml(statistics.lastRepair) : '';
+	return `<!doctype html><html><head><meta charset="UTF-8"><style>
+	:root { color-scheme: light dark; --border: #d1d5db; --muted: #6b7280; }
+	body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; max-width: 760px; margin: 0 auto; padding: 28px 32px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
+	h { text-align: left; font-weight: 600; } td, th { border-bottom: 1px solid var(--border); padding: 9px 12px; } td:not(:first-child), th:not(:first-child) { text-align: right; } table { border-collapse: collapse; width: 100%; margin: 12px 0 28px; } h1 { font-size: 1.45rem; margin: 0 0 24px; } h2 { font-size: 1rem; margin: 24px 0 8px; } .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; } .card { border: 1px solid var(--border); padding: 14px; } .value { display: block; font-size: 1.35rem; font-weight: 650; } .label { color: var(--muted); font-size: .82rem; }
+	</style></head><body><h1>SyntaxStitch Repair Statistics</h1><div class="cards"><div class="card"><span class="label">Total repairs</span><span class="value">${statistics.total}</span></div><div class="card"><span class="label">Direct</span><span class="value">${bySource.direct}</span></div><div class="card"><span class="label">Indirect</span><span class="value">${bySource.indirect}</span></div></div><h2>Repair Types</h2><table><thead><tr><th>Type</th><th>Total</th><th>Direct</th><th>Indirect</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No repair types recorded.</td></tr>'}</tbody></table><h2>Period</h2><p>${escapeHtml(repairPeriod(statistics.firstAt, statistics.lastAt))}</p>${lastRepair ? `<h2>Last Repair</h2><p>${lastRepair}</p>` : ''}</body></html>`;
+};
 export const repairStatusPresentation = (statistics: Readonly<RepairStatistics>, enabled: boolean): { text: string; tooltip: string; accessibilityLabel: string } => {
-	const state = enabled ? 'enabled' : 'disabled', { total, byKind, unclassified, lastRepair } = statistics;
-	const details = [`()  Parentheses: ${byKind.parenthesis}`, `[]  Square brackets: ${byKind.square}`, `{}  Curly braces: ${byKind.curly}`, `<>  Tags: ${byKind.tag}`, `""  Quotes: ${byKind.quote}`, `\\t  Indentation: ${byKind.indent}`];
+	const state = enabled ? 'enabled' : 'disabled', { total, byKind, unclassified, lastRepair } = statistics, bySource = { direct: 0, indirect: 0, ...statistics.bySource }, byKindSource = Object.fromEntries(REPAIR_KINDS.map(kind => [kind, { direct: 0, indirect: 0, ...statistics.byKindSource?.[kind] }])) as Record<RepairKind, Record<RepairSource, number>>;
+	const labels: Record<RepairKind, string> = { square: '[]  Square brackets', parenthesis: '()  Parentheses', curly: '{}  Curly braces', tag: '<>  Tags', quote: '""  Quotes', indent: '\\tab  Indentation' };
+	const details = [`Direct: ${bySource.direct}`, `Indirect: ${bySource.indirect}`, ...REPAIR_KINDS.filter(kind => byKind[kind] > 0).map(kind => `${labels[kind]}: ${byKind[kind]} (direct ${byKindSource[kind].direct}, indirect ${byKindSource[kind].indirect})`), `Period: ${repairPeriod(statistics.firstAt, statistics.lastAt)}`];
 	if (unclassified) { details.push(`?  Legacy unclassified: ${unclassified}`); }
 	return { text: `{S} ${total}`, tooltip: `SyntaxStitch is ${state}.\n\n${total} repairs\n${details.join('\n')}${lastRepair ? `\n\nLast repair\n${lastRepair}` : ''}\n\nClick for actions.`, accessibilityLabel: `SyntaxStitch is ${state} with ${total} repairs.${lastRepair ? ` Last repair: ${lastRepair}.` : ''} Activate for actions.` };
 };
@@ -235,6 +858,7 @@ const tagTokenEnd = (text: string, start: number): number => {
 	return start;
 };
 const placePendingTagCaret = (editor: vscode.TextEditor): void => {
+	if (!documentHasOpenEditor(editor.document)) { pendingTagCarets.delete(editor); return; }
 	const pending = pendingTagCarets.get(editor);
 	if (!pending) { return; }
 	if (editor.document.version !== pending.version || Date.now() > pending.expiresAt || !editor.selection.isEmpty) { pendingTagCarets.delete(editor); return; }
@@ -256,7 +880,8 @@ const captureTagCaret = (event: vscode.TextDocumentChangeEvent): void => {
 // endregion
 
 // region Reconciliation
-type ProtectedBoundaryIntent = { deletion: DirectDeletion; pairId: string; blockType: BlockType; side: 'open' | 'close' };
+type ProtectedBoundaryIntent = { deletion: DirectDeletion; pairId: string; blockType: BlockType; side: 'open' | 'close'; selectionKind: 'pair' | 'token' };
+type TagContentSelection = { start: number; length: number };
 const protectedBoundaryIntent = (event: vscode.TextDocumentChangeEvent, patches: readonly RepairPatch[]): ProtectedBoundaryIntent | undefined => {
 	const change = event.contentChanges[0], deletion = directDeletions.get(keyOf(event.document)), editor = deletion?.editor;
 	if (!editor || !deletion || editor.document !== event.document || event.contentChanges.length !== 1 || !change || change.text || change.rangeLength !== 1) { return undefined; }
@@ -264,16 +889,22 @@ const protectedBoundaryIntent = (event: vscode.TextDocumentChangeEvent, patches:
 	if (deletion.offset !== expectedOffset) { return undefined; }
 	const patch = patches.find(candidate => candidate.text && (candidate.blockType === 'brace' || candidate.blockType === 'tag' || candidate.blockType === 'quote') && (candidate.side === 'open' || candidate.side === 'close'));
 	if (patch) { directDeletions.delete(keyOf(event.document)); }
-	return patch ? { deletion, pairId: patch.pairId, blockType: patch.blockType, side: patch.side } : undefined;
+	const selectionKind = patch?.selectionKind ?? 'pair';
+	return patch ? { deletion, pairId: patch.pairId, blockType: patch.blockType, side: patch.side, selectionKind } : undefined;
 };
 const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.OutputChannel, counter: RepairCounter, status: vscode.StatusBarItem): Promise<void> => {
 	const document = event.document, key = keyOf(document);
 	if (!isEnabled(document)) { states.delete(key); return; }
+	if (!documentHasOpenEditor(document)) { states.delete(key); pendingTagRenames.delete(key); return; }
 	if (repairing.has(key) || !event.contentChanges.length) { index(document); return; }
 	const state = states.get(key);
 	if (!state || state.languageId !== document.languageId) { index(document); return; }
 	const pendingRename = pendingTagRenames.get(key), change = event.contentChanges.length === 1 ? event.contentChanges[0] : undefined;
-	if (pendingRename && change) {
+	const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document === document), mode = editor && structuralSelectionModes.get(editor), focused = mode?.spans[mode.focused];
+	if (mode?.typing && focused && change && change.rangeOffset >= focused.start && change.rangeOffset <= focused.end) { index(document); return; }
+	const preliminaryStructural = change ? state.shadow.planRepairs(event.contentChanges, document.getText()) : [], partialTagBoundary = preliminaryStructural.some(patch => patch.blockType === 'tag' && patch.selectionKind === 'token');
+	if (partialTagBoundary) { pendingTagRenames.delete(key); }
+	if (pendingRename && change && !partialTagBoundary) {
 		const delta = change.text.length - change.rangeLength, counterpartNameStart = pendingRename.counterpartNameStart + (change.rangeOffset <= pendingRename.counterpartNameStart ? delta : 0), renamed = tagNameAt(document.getText(), pendingRename.tokenStart);
 		if (renamed && change.rangeOffset >= pendingRename.tokenStart && change.rangeOffset <= renamed.end) {
 			pendingTagRenames.delete(key);
@@ -285,7 +916,7 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 		}
 		pendingTagRenames.delete(key);
 	}
-	if (event.contentChanges.length) {
+	if (event.contentChanges.length && !partialTagBoundary) {
 		const pair = state.shadow.pairs.find(candidate => candidate.type === 'tag' && [
 			{ side: 'open' as const, token: candidate.openToken, tokenStart: candidate.openIdx, counterpart: candidate.closeToken, counterpartStart: candidate.closeIdx },
 			{ side: 'close' as const, token: candidate.closeToken, tokenStart: candidate.closeIdx, counterpart: candidate.openToken, counterpartStart: candidate.openIdx },
@@ -306,11 +937,31 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 			}
 		}
 	}
-	const structures = vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri).get<BlockType[]>('structures', ['brace', 'tag', 'quote', 'indent']);
-	const structural = state.shadow.planRepairs(event.contentChanges, document.getText()).filter(patch => structures.includes(patch.blockType));
-	const plannedPatches = [...structural, ...planClosingIndentRepairs(document, event.contentChanges)].sort((left, right) => right.offset - left.offset);
+	const structures = vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri).get<StructureSetting[]>('structures', ['brace', 'tag', 'quote', 'indent']);
+	const structural = preliminaryStructural.filter(patch => patch.blockType === 'brace' ? structures.includes('brace') || structures.includes(patch.kind) : structures.includes(patch.blockType));
+	const providerDuplicate = partialTagBoundary && change && !change.text ? (() => {
+		const pair = state.shadow.pairs.find(candidate => candidate.type === 'tag' && candidate.openIdx + candidate.openToken.length - 1 === change.rangeOffset);
+		if (!pair || pair.openToken.startsWith('</')) { return undefined; }
+		const text = document.getText(), searchStart = pair.openIdx + pair.openToken.length - 1, first = text.indexOf(pair.closeToken, searchStart), second = first < 0 ? -1 : text.indexOf(pair.closeToken, first + pair.closeToken.length);
+		return first >= searchStart && second >= 0 ? { offset: first, deleteLength: pair.closeToken.length, text: '', pairId: pair.id, side: 'close' as const, blockType: 'tag' as const, kind: 'tag' as const, rule: 'remove-provider-duplicate-tag' } : undefined;
+	})() : undefined;
+	const resultingTagPairs = new ShadowStructure(document.getText(), document.languageId).pairs.filter(pair => pair.type === 'tag');
+	const plannedPatches = [...structural, ...(providerDuplicate ? [providerDuplicate] : []), ...planClosingIndentRepairs(document, event.contentChanges)]
+		.filter(patch => patch.rule !== 'restore-closer' || !resultingTagPairs.some(pair => pair.closeIdx === patch.offset && pair.closeToken === patch.text))
+		.sort((left, right) => right.offset - left.offset);
 	if (!plannedPatches.length) { index(document); return; }
 	const boundaryIntent = protectedBoundaryIntent(event, plannedPatches), directChange = event.contentChanges[0];
+	const tagContentSelection: TagContentSelection | undefined = event.contentChanges.length === 1 && !directChange.text ? (() => {
+		const pair = state.shadow.pairs.find(candidate => candidate.type === 'tag' && [
+			{ start: candidate.openIdx, length: candidate.openToken.length },
+			{ start: candidate.closeIdx, length: candidate.closeToken.length },
+		].some(boundary => boundary.start === directChange.rangeOffset && boundary.length === directChange.rangeLength));
+		const counterpartRepair = pair && plannedPatches.find(patch => patch.pairId === pair.id && patch.blockType === 'tag' && !patch.text);
+		if (!pair || !counterpartRepair) { return undefined; }
+		const endingTag = state.shadow.pairs.find(candidate => candidate.type === 'tag' && candidate.openIdx > pair.openIdx && candidate.closeIdx + candidate.closeToken.length === pair.closeIdx);
+		if (endingTag) { return { start: endingTag.closeIdx - pair.openToken.length, length: endingTag.closeToken.length }; }
+		return { start: pair.openIdx, length: pair.closeIdx - pair.openIdx - pair.openToken.length };
+	})() : undefined;
 	const patches = boundaryIntent?.blockType === 'brace' && boundaryIntent.side === 'close' ? plannedPatches.map(patch => patch.pairId === boundaryIntent.pairId ? { ...patch, offset: directChange.rangeOffset, deleteLength: 0, text: patch.text.at(-1) ?? patch.text } : patch) : plannedPatches;
 
 	const edit = new vscode.WorkspaceEdit();
@@ -320,12 +971,14 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 	try {
 		applied = await vscode.workspace.applyEdit(edit);
 		repairing.delete(key);
-		const countedRepairs = applied ? await counter.record(patches, document.uri, repairDescription(document, patches, state.shadow.pairs)) : 0;
+		const documentOpen = vscode.workspace.textDocuments.includes(document), documentVisible = vscode.window.visibleTextEditors.some(editor => editor.document === document), windowFocused = vscode.window.state.focused;
+		const source: RepairSource = directDeletions.has(key) && documentOpen && documentVisible && windowFocused ? 'direct' : 'indirect';
+		const countedRepairs = applied ? await counter.record(patches, document.uri, repairDescription(document, patches, state.shadow.pairs), source) : 0;
 		if (countedRepairs) {
 			refreshStatus(status, counter);
 			if (vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri).get('flashStatus', true)) { flashStatus(status); }
 		}
-		log(output, document.uri, 'repairs', { type: 'syntaxstitch/reconciled', uri: document.uri.toString(), version: document.version, applied, countedRepairs, suppressedRepeats: applied ? patches.length - countedRepairs : 0, repairs: patches });
+		log(output, document.uri, 'repairs', { type: 'syntaxstitch/reconciled', uri: document.uri.toString(), version: document.version, applied, source, documentOpen, documentVisible, windowFocused, countedRepairs, suppressedRepeats: applied ? patches.length - countedRepairs : 0, repairs: patches });
 		if (!applied) { log(output, document.uri, 'repairs', { type: 'syntaxstitch/error', uri: document.uri.toString(), reason: 'workspace-edit-rejected' }); }
 	} catch (error) {
 		log(output, document.uri, 'repairs', { type: 'syntaxstitch/error', uri: document.uri.toString(), reason: error instanceof Error ? error.message : String(error) });
@@ -334,7 +987,14 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 		index(document);
 		const shadow = states.get(key)?.shadow, restored = applied && boundaryIntent ? shadow?.pairs.find(pair => pair.id === boundaryIntent.pairId) : undefined;
 		if (restored && boundaryIntent) {
-			boundaryIntent.deletion.selection = new vscode.Selection(document.positionAt(restored.openIdx), document.positionAt(restored.closeIdx + restored.closeToken.length));
+			const start = boundaryIntent.selectionKind === 'token' && boundaryIntent.side === 'close' ? restored.closeIdx : restored.openIdx;
+			const token = boundaryIntent.side === 'close' ? restored.closeToken : restored.openToken;
+			const end = boundaryIntent.selectionKind === 'token' ? start + token.length : restored.closeIdx + restored.closeToken.length;
+			boundaryIntent.deletion.selection = new vscode.Selection(document.positionAt(start), document.positionAt(end));
+		}
+		if (applied && tagContentSelection) {
+			const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document === document);
+			if (editor) { editor.selection = new vscode.Selection(document.positionAt(tagContentSelection.start), document.positionAt(tagContentSelection.start + tagContentSelection.length)); }
 		}
 	}
 };
@@ -344,6 +1004,11 @@ const reconcile = async (event: vscode.TextDocumentChangeEvent, output: vscode.O
 export function activate(context: vscode.ExtensionContext): void {
 	const output = vscode.window.createOutputChannel(OUTPUT_NAME, { log: true });
 	const status = vscode.window.createStatusBarItem('syntaxstitch.status', vscode.StatusBarAlignment.Right, 100);
+	structuralSelectionDecoration = vscode.window.createTextEditorDecorationType({ backgroundColor: new vscode.ThemeColor('editor.wordHighlightBackground'), border: '1px solid ' + new vscode.ThemeColor('editor.wordHighlightBorder').id, overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.wordHighlightForeground'), overviewRulerLane: vscode.OverviewRulerLane.Center });
+	structuralSelectionFocusedDecoration = vscode.window.createTextEditorDecorationType({ backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'), border: '2px solid ' + new vscode.ThemeColor('editor.findMatchBorder').id, overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.findMatchForeground'), overviewRulerLane: vscode.OverviewRulerLane.Center });
+	structuralSelectionInactiveDecoration = vscode.window.createTextEditorDecorationType({ backgroundColor: '#ef444433', border: '1px solid #ef4444', opacity: '0.75', overviewRulerColor: '#ef4444', overviewRulerLane: vscode.OverviewRulerLane.Center });
+	structuralSelectionFocusedInactiveDecoration = vscode.window.createTextEditorDecorationType({ backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground'), border: '2px dashed ' + new vscode.ThemeColor('editorWarning.foreground'), opacity: '0.95', overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.warningForeground'), overviewRulerLane: vscode.OverviewRulerLane.Center });
+	structuralSelectionComponentDecoration = vscode.window.createTextEditorDecorationType({ backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground'), border: '1px solid ' + new vscode.ThemeColor('editorLink.activeForeground').id });
 	const pairLabelsChanged = new vscode.EventEmitter<void>();
 	const counter = new RepairCounter(context);
 	const refreshLabels = (): void => pairLabelsChanged.fire();
@@ -387,14 +1052,87 @@ export function activate(context: vscode.ExtensionContext): void {
 	};
 
 	context.subscriptions.push(
+		{ dispose: () => { for (const cancel of pendingComponentCancellations.values()) { cancel(); } } },
 		output,
 		status,
+		structuralSelectionDecoration,
+		structuralSelectionFocusedDecoration,
+		structuralSelectionInactiveDecoration,
+		structuralSelectionFocusedInactiveDecoration,
+		structuralSelectionComponentDecoration,
 		pairLabelsChanged,
 		vscode.languages.registerInlayHintsProvider([{ scheme: 'file' }, { scheme: 'untitled' }, { scheme: 'vscode-notebook-cell' }], { onDidChangeInlayHints: pairLabelsChanged.event, provideInlayHints: pairLabelHints }),
 		vscode.workspace.onDidOpenTextDocument(document => { if (isEnabled(document)) { index(document); refreshLabels(); } }),
-		vscode.workspace.onDidCloseTextDocument(document => states.delete(keyOf(document))),
+		vscode.workspace.onDidCloseTextDocument(document => {
+			const key = keyOf(document);
+			states.delete(key);
+			pendingTagRenames.delete(key);
+			directDeletions.get(key)?.complete();
+			directDeletions.delete(key);
+		}),
+		vscode.window.tabGroups.onDidChangeTabs(() => {
+			for (const [editor, cancel] of pendingComponentCancellations) {
+				if (!documentHasOpenEditor(editor.document)) {
+					cancel();
+					structuralSelectionModes.delete(editor);
+					pendingTagCarets.delete(editor);
+				}
+			}
+		}),
 		vscode.workspace.onDidChangeTextDocument(event => {
 			const key = keyOf(event.document), deletion = directDeletions.get(key);
+			// Disk reloads and reverts are authoritative. Repairing them dirties the
+			// buffer again and can prevent a reverted editor from staying closed.
+			if (!event.document.isDirty && event.contentChanges.length) {
+				pendingTagRenames.delete(key);
+				directDeletions.delete(key);
+				deletion?.complete();
+				for (const editor of vscode.window.visibleTextEditors.filter(candidate => candidate.document === event.document)) {
+					pendingComponentCancellations.get(editor)?.();
+					pendingComponentChanges.delete(editor);
+					pendingTagCarets.delete(editor);
+					selectionHistory.delete(editor);
+					lastSelections.delete(editor);
+					structuralSelectionModes.delete(editor);
+					renderStructuralSelectionMode(editor, undefined);
+					if (editor === vscode.window.activeTextEditor) {
+						void vscode.commands.executeCommand('setContext', 'syntaxstitch.structuralSelectionMode', false);
+						void vscode.commands.executeCommand('setContext', 'syntaxstitch.structuralSelectionTyping', false);
+					}
+				}
+				if (isEnabled(event.document)) { index(event.document); } else { states.delete(key); }
+				refreshLabels();
+				return;
+			}
+			const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document === event.document)
+				?? (vscode.window.activeTextEditor?.document === event.document ? vscode.window.activeTextEditor : undefined);
+			if (editor && !repairing.has(key) && event.contentChanges.length === 1) {
+				pendingComponentChanges.set(editor, event.contentChanges[0]);
+				if (!pendingComponentTimers.has(editor)) {
+					let resolvePropagation!: (result: boolean) => void;
+					const propagation = new Promise<boolean>(resolve => { resolvePropagation = resolve; });
+					pendingComponentPropagations.set(editor, propagation);
+					const timer = setTimeout(async () => {
+						pendingComponentCancellations.delete(editor);
+						pendingComponentTimers.delete(editor);
+						const change = pendingComponentChanges.get(editor);
+					pendingComponentChanges.delete(editor);
+					const result = change ? await propagateMatchingComponentEdit(editor, change).then(applied => applied || propagateMatchingInnerTextEdit(editor, change)).catch(() => false) : false;
+					resolvePropagation(result);
+					if (pendingComponentPropagations.get(editor) === propagation) { pendingComponentPropagations.delete(editor); }
+					}, 100);
+				pendingComponentTimers.set(editor, timer);
+				pendingComponentCancellations.set(editor, () => {
+					clearTimeout(timer);
+					pendingComponentTimers.delete(editor);
+					pendingComponentChanges.delete(editor);
+					pendingComponentCancellations.delete(editor);
+					if (pendingComponentPropagations.get(editor) === propagation) { pendingComponentPropagations.delete(editor); }
+					resolvePropagation(false);
+				});
+				}
+			}
+			if (editor && (!repairing.has(key) || !structuralSelectionModes.get(editor)?.typing)) { for (const change of [...event.contentChanges].sort((left, right) => right.rangeOffset - left.rangeOffset)) { rebaseStructuralSelectionMode(editor, change, repairing.has(key)); } }
 			void reconcile(event, output, counter, status).finally(() => {
 				if (deletion && directDeletions.get(key) === deletion) { directDeletions.delete(key); }
 				deletion?.complete();
@@ -404,7 +1142,14 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.window.onDidChangeActiveTextEditor(() => { refreshStatus(status, counter); refreshLabels(); }),
 		vscode.window.onDidChangeVisibleTextEditors(refreshLabels),
-		vscode.window.onDidChangeTextEditorSelection(event => { placePendingTagCaret(event.textEditor); refreshLabels(); }),
+		vscode.window.onDidChangeTextEditorSelection(event => {
+			const editor = event.textEditor, current = snapshotSelections(editor), previous = lastSelections.get(editor);
+			lastSelections.set(editor, current);
+			if (!structuralSelectionModes.get(editor)?.typing) { balanceForwardSelection(editor, previous, current); }
+			if (lastSelections.get(editor) !== current) { lastSelections.set(editor, snapshotSelections(editor)); }
+			placePendingTagCaret(editor);
+			refreshLabels();
+		}),
 		vscode.workspace.onDidChangeConfiguration(event => {
 			if (!event.affectsConfiguration(CONFIG_SECTION)) { return; }
 			states.clear();
@@ -416,16 +1161,87 @@ export function activate(context: vscode.ExtensionContext): void {
 			const enabled = enabledSetting(vscode.window.activeTextEditor?.document.uri);
 			const selected = await vscode.window.showQuickPick([
 				{ label: enabled ? '$(circle-slash) Disable SyntaxStitch' : '$(shield) Enable SyntaxStitch', command: 'syntaxstitch.toggle' },
+				{ label: '$(gear) Open Settings', command: 'syntaxstitch.openSettings' },
+				{ label: '$(selection) Enter Nested Select', description: 'Ctrl+Alt+S / Cmd+Option+S', command: 'syntaxstitch.enterStructuralSelectionMode' },
 				{ label: '$(selection) Select Matching Structure', command: 'syntaxstitch.selectMatchingStructure' },
 				{ label: '$(fold-down) Select Inner Structure', command: 'syntaxstitch.selectInnerStructure' },
-				{ label: '$(graph) View Repair Statistics', command: 'syntaxstitch.showStatistics' },
 				{ label: '$(symbol-key) Configure Pair Labels', command: 'syntaxstitch.configurePairLabels' },
+				{ label: '$(graph) View Repair Statistics', command: 'syntaxstitch.showStatistics' },
 				{ label: '$(discard) Reset Repair Count', command: 'syntaxstitch.resetStatistics' },
 				{ label: '$(output) Show Reconciliation Output', command: 'syntaxstitch.showOutput' },
 				{ label: '$(refresh) Rebuild Shadow Index', command: 'syntaxstitch.rebuildShadowIndex' },
 			], { placeHolder: `SyntaxStitch: ${counter.statistics.total} repairs recorded` });
 			if (selected) { await vscode.commands.executeCommand(selected.command); }
 		}),
+		vscode.commands.registerCommand('syntaxstitch.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:BrockNash.syntaxstitch')),
+		vscode.commands.registerCommand('syntaxstitch.enterStructuralSelectionMode', () => enterStructuralSelectionMode(vscode.window.activeTextEditor!)),
+		vscode.commands.registerCommand('syntaxstitch.exitStructuralSelectionTyping', async () => {
+			const editor = vscode.window.activeTextEditor;
+			if (!editor) { return false; }
+			// Finish mirrored edits before leaving typing mode so their offsets are rebased only once.
+			await pendingComponentPropagations.get(editor);
+			if (!documentHasOpenEditor(editor.document)) { return false; }
+			const mode = structuralSelectionModes.get(editor);
+			if (!mode) { return false; }
+			const focused = mode.spans[mode.focused], caret = editor.document.offsetAt(editor.selection.active), spans = focused && mode.typing && editor.selection.isEmpty && caret >= focused.end
+				? mode.spans.map((span, index) => index === mode.focused ? { ...span, end: caret } : span)
+				: mode.spans;
+			const nextMode = { ...mode, spans, typing: false };
+			applyStructuralSelectionMode(editor, nextMode);
+			await finalizeUniqueHtmlIdPropagation(editor, nextMode);
+			return true;
+		}),
+		vscode.commands.registerCommand('syntaxstitch.exitStructuralSelectionMode', () => exitStructuralSelectionMode(vscode.window.activeTextEditor!)),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionEnter', () => activateStructuralSelection(vscode.window.activeTextEditor!)),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionDrillDown', () => {
+			const editor = vscode.window.activeTextEditor;
+			if (!editor) { return false; }
+			if (cyclePeerComponentSelection(editor, 1) || cycleDerivedComponentPeerSelection(editor, 1)) { return true; }
+			if (structuralSelectionModes.get(editor)?.stage === 'inner' && cycleInnerContentSelection(editor, 1)) { return true; }
+			if (structuralSelectionModes.get(editor)?.stage === 'components') { return true; }
+			return cycleStructuralPeerSelection(editor, 1) || cycleDerivedNestedPeerSelection(editor, 1) || enterNextStructuralStage(editor, false);
+		}),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionDrillUp', () => {
+			const editor = vscode.window.activeTextEditor;
+			if (!editor) { return false; }
+			if (cyclePeerComponentSelection(editor, -1) || cycleDerivedComponentPeerSelection(editor, -1)) { return true; }
+			if (structuralSelectionModes.get(editor)?.stage === 'inner' && cycleInnerContentSelection(editor, -1)) { return true; }
+			if (structuralSelectionModes.get(editor)?.stage === 'components') { return true; }
+			if (cycleStructuralPeerSelection(editor, -1) || cycleDerivedNestedPeerSelection(editor, -1)) { return true; }
+			return climbStructuralSelection(editor);
+		}),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionHome', () => { const editor = vscode.window.activeTextEditor, mode = editor && structuralSelectionModes.get(editor); if (!editor || !mode) { return false; } applyStructuralSelectionMode(editor, { ...mode, focused: 0 }); return true; }),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionEnd', () => { const editor = vscode.window.activeTextEditor, mode = editor && structuralSelectionModes.get(editor); if (!editor || !mode) { return false; } applyStructuralSelectionMode(editor, { ...mode, focused: mode.spans.length - 1 }); return true; }),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionNext', () => {
+			const editor = vscode.window.activeTextEditor, mode = editor && structuralSelectionModes.get(editor);
+			if (!editor || !mode) { return false; }
+			if (mode.stage === 'components' && descendFromComponentSelection(editor)) { return true; }
+			return mode.stage === 'structure' ? enterNextStructuralStage(editor, false) : (applyStructuralSelectionMode(editor, { ...mode, focused: (mode.focused + 1) % mode.spans.length }), true);
+		}),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionPrevious', () => {
+			const editor = vscode.window.activeTextEditor, mode = editor && structuralSelectionModes.get(editor);
+			if (!editor || !mode) { return false; }
+			if (reverseComponentToAncestor(editor)) { return true; }
+			return mode.stage === 'structure' || mode.stage === 'components' ? climbStructuralSelection(editor) : changeStructuralStage(editor, -1);
+		}),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionComponents', () => enterNextStructuralStage(vscode.window.activeTextEditor!)),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionToggle', () => {
+			const editor = vscode.window.activeTextEditor, mode = editor && structuralSelectionModes.get(editor);
+			if (!editor || !mode) { return false; }
+			const spans = mode.spans.map((span, index) => index === mode.focused ? { ...span, highlighted: span.highlighted === false } : span);
+			applyStructuralSelectionMode(editor, { ...mode, spans });
+			return true;
+		}),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionDelete', () => {
+			const editor = vscode.window.activeTextEditor, mode = editor && structuralSelectionModes.get(editor);
+			if (!editor || !mode) { return false; }
+			const spans = mode.spans.filter((_, index) => index !== mode.focused);
+			if (!spans.length) { return exitStructuralSelectionMode(editor); }
+			applyStructuralSelectionMode(editor, { ...mode, spans, focused: Math.min(mode.focused, spans.length - 1) });
+			return true;
+		}),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionExpandRight', () => expandStructuralSelectionMode(vscode.window.activeTextEditor!, 1)),
+		vscode.commands.registerCommand('syntaxstitch.structuralSelectionExpandLeft', () => expandStructuralSelectionMode(vscode.window.activeTextEditor!, -1)),
 		vscode.commands.registerCommand('syntaxstitch.toggle', async () => {
 			const uri = vscode.window.activeTextEditor?.document.uri, config = vscode.workspace.getConfiguration(CONFIG_SECTION, uri), enabled = enabledSetting(uri);
 			const target = vscode.workspace.workspaceFolders?.length ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
@@ -457,10 +1273,17 @@ export function activate(context: vscode.ExtensionContext): void {
 			await completed;
 			if (deletion.selection) { editor.selection = deletion.selection; }
 		})),
-		vscode.commands.registerCommand('syntaxstitch.showStatistics', () => {
-			const { total, byKind, unclassified, lastAt } = counter.statistics, last = lastAt ? new Date(lastAt).toLocaleString() : 'Never';
-			void vscode.window.showInformationMessage(`SyntaxStitch repaired ${total} tokens: [${byKind.square}], (${byKind.parenthesis}), {${byKind.curly}}, <${byKind.tag}>, "${byKind.quote}", t${byKind.indent}${unclassified ? `, ?${unclassified} legacy` : ''}. Last repair: ${last}.`);
-			return counter.statistics;
+		vscode.commands.registerCommand('syntaxstitch.showStatistics', async () => {
+			const statistics = counter.statistics;
+			if (statisticsPanel) {
+				statisticsPanel.reveal(vscode.ViewColumn.Active);
+				statisticsPanel.webview.html = statisticsHtml(statistics);
+				return statistics;
+			}
+			const panel = statisticsPanel = vscode.window.createWebviewPanel('syntaxstitch.statistics', 'SyntaxStitch Statistics', vscode.ViewColumn.Active, { enableScripts: false });
+			panel.onDidDispose(() => { if (statisticsPanel === panel) { statisticsPanel = undefined; } });
+			panel.webview.html = statisticsHtml(statistics);
+			return statistics;
 		}),
 		vscode.commands.registerCommand('syntaxstitch.resetStatistics', async () => {
 			await counter.reset();
@@ -619,9 +1442,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (history) { history.length = 0; }
 			const shadow = states.get(keyOf(editor.document))!.shadow;
 			let selected = 0;
-			editor.selections = editor.selections.map(selection => {
+			editor.selections = editor.selections.flatMap(selection => {
 				if (selection.isEmpty) { return selection; }
 				const start = editor.document.offsetAt(selection.start), end = editor.document.offsetAt(selection.end);
+				const spans = shadow.innerSelectionSpans(start, end);
+				if (spans.length > 1) {
+					selected += spans.length;
+					return spans.map(span => new vscode.Selection(editor.document.positionAt(span.start), editor.document.positionAt(span.end)));
+				}
 				const span = shadow.innerSelectionSpan(start, end, selection.active.isAfter(selection.anchor));
 				if (!span) { return selection; }
 				selected++;

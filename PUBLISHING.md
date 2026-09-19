@@ -14,7 +14,7 @@ GitHub does not automatically register a repository as a VS Code extension. This
 
 1. Choose the next [Semantic Version](https://semver.org/) and update `version` in `package.json`.
 2. Move relevant entries from **Unreleased** to a dated version section in `CHANGELOG.md`.
-3. Run `npm test` and `npm run package:vsix`.
+3. Run `npm run test:publish` to validate the extension and unit matrix, then run `npm run package:vsix` to create the VSIX artifact.
 4. Commit and push the release changes.
 5. Create and publish a GitHub Release whose tag is the exact package version prefixed with `v`, such as `v0.1.0`.
 
