@@ -87,17 +87,27 @@ Nested Select is an interactive navigation and editing mode, entered with **Synt
 | Shift+Arrow on an HTML attribute | Select its complete `key="value"` clause; repeat to add adjacent matching clauses across peer elements, including discontiguous ranges. |
 | Type into a focused selection, then press Enter | Finish typing and wait for mirrored edits before resuming navigation. |
 | Return to a saved parent after editing | Restore its selection set and focus with rebased offsets. |
-| Edit a markup attribute value | Match the attribute key on other elements with the same tag name throughout the document, independently of attribute order or the original selection bounds. Missing keys are skipped. Changes containing whitespace do not trigger propagation. |
-| Edit an attribute name | Match the corresponding attribute position on elements with the same tag name. |
-| Finish an HTML ID value edit | Number participating IDs in document order. Only an edited `id` key triggers this step; other keys cannot overwrite IDs. |
+| Edit a markup attribute value | Match the attribute key on other elements with the same tag name within the chosen mirroring scope, independently of attribute order. Original selection is the default; enclosing structure and entire document are opt-in scopes. Missing keys are skipped. Quoted values containing whitespace use the same rules for typing and paste; destination quotes are escaped and unquoted peers are quoted when necessary. |
+| Edit an attribute name | Capture the original key and match that key on elements with the same tag name, regardless of attribute order. After applying a rename, subsequent keystrokes follow the new key. Skip peers that already have the new name. |
+| Finish an HTML ID value edit | Number participating IDs within the chosen scope in document order, skipping values already reserved by untouched elements anywhere in the document. Decode HTML entities when comparing IDs, including IDs on void elements. Empty or whitespace-containing bases are not numbered. Only an edited `id` key triggers this step; other keys cannot overwrite IDs. |
 | Toggle a highlight or remove a selection entry | Change the navigation set or its presentation without deleting source text. Toggled-off elements are excluded from attribute propagation and unique-ID renumbering. |
 | Press Escape while typing | Return to navigation; another Escape exits. Existing edits remain. |
 | Close the last tab for a document | Cancel queued attribute edits and prevent automatic repairs without an open editor tab. Explicit user commands can still open a document. |
 | Revert or reload clean saved content | Reindex without repairing or making the buffer dirty again; clear stale selection state and pending edits. |
 
+Pending mirrors apply automatically after a 100 ms pause, or immediately when finishing typing. Targets, source text, document version and selection session are captured before navigation can change the focus. Undo/redo, conflicting edits, replacement sessions, pause, scope changes and closed documents invalidate stale work. Every document has one pending transaction, including when opened in multiple panes. Native typing and mirrored edits join the open undo group; scripted callers may introduce their own undo stops.
+
 Editor-host regressions cover mirrored edits from a middle element, attribute-key isolation with reordered attributes, parent restoration, disk reverts, closed documents, and closing a tab with propagation queued.
 
 ## Existing Controls
+
+- **Pause / Resume This File** suspends automatic changes for this document until resumed or the document closes. Resume reindexes the current text.
+- **Skip Next Edit / Cancel Skip** bypasses the next nonempty external text-change event in the active document, including multi-cursor batches, whether or not repair would have been needed. Invoking it again cancels the pending skip. Internal repair changes do not consume it.
+- Pause and skip cancel pending mirrored edits and clear Nested Select. They do not undo edits already applied.
+- `syntaxstitch.mirroringScope` defaults to `selection`; `enclosing` captures the nearest strict container on entry (or falls back to selection), and `document` permits whole-document matching. The session picker changes scope without changing settings. Bounds follow edits independently of navigation. Attribute mirroring and ID numbering use the same bounds; inner-text mirroring additionally requires eligible navigation peers.
+- Nested Select previews the target ranges and count, with contextual navigation or typing hints in its status hover.
+- Undo and redo are authoritative, like disk reloads: cancel queued propagation, clear selection state, and reindex without fresh automatic edits.
+- Recent Repairs retains the last 100 applied repair records in session memory, including cooldown-suppressed repeats, with a rule explanation and the recorded location. No source snippets are retained; later edits may move recorded locations.
 
 - `syntaxstitch.enabled` disables all reconciliation.
 - `syntaxstitch.structures` enables or disables `square`, `parenthesis`, `curly`, `tag`, `quote`, and `indent` families. The legacy `brace` value remains supported as an umbrella for all three bracket kinds.
@@ -137,3 +147,5 @@ Rules could then be ordered from most specific to least specific:
 The first matching rule would return `allow`, `disable`, or `inherit`. A repair hover could offer shortcuts such as "Disable this exact case", "Disable quote restoration in TypeScript", or "Disable all quote repair", while opening the generated setting for review before saving it.
 
 Before implementing this, collect real repair contexts without source contents, review which distinctions users actually need, define precedence and migration behavior, and add conflict-resolution tests. Content predicates such as length or newline presence should be declarative fields, not executable callbacks.
+
+- Saving flushes queued mirrored edits and exits the document’s Nested Select sessions before later save participants run. Pending progress counts peer replacements; cancelled transactions report a brief status message.

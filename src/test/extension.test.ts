@@ -276,6 +276,12 @@ suite('ShadowStructure', () => {
 });
 
 suite('Extension integration', () => {
+	// The output-panel test must not leave native editor commands targeting that panel.
+	setup(async () => {
+		await vscode.commands.executeCommand('workbench.action.closePanel');
+		await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+		await new Promise(resolve => setTimeout(resolve, 40));
+	});
 	test('does not repair or reopen a document with no open tab', async () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'syntaxstitch-closed-')), filename = path.join(directory, 'closed.js');
 		fs.writeFileSync(filename, 'call(value)');
@@ -472,6 +478,23 @@ suite('Extension integration', () => {
 		assert.strictEqual(document.getText(editor.selection), '<span>Nested Span</span>');
 		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionComponents');
 		assert.strictEqual(document.getText(editor.selection), 'Nested Span');
+		await vscode.commands.executeCommand('syntaxstitch.exitStructuralSelectionMode');
+	});
+
+	test('enters the empty inner content of the focused nested peer', async () => {
+		const content = '<div><span id="spanA" class="btn"><span>Test</span></span><span id="spanB" class="btn2"><span id="spanBB" class="btn2">Message</span></span><span id="spanC"><span id="spanCB" class="btn"></span></span></div>', document = await vscode.workspace.openTextDocument({ language: 'html', content }), editor = await vscode.window.showTextDocument(document);
+		editor.selection = new vscode.Selection(document.positionAt(0), document.positionAt(content.length));
+		await vscode.commands.executeCommand('syntaxstitch.enterStructuralSelectionMode');
+		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionNext');
+		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionDrillDown');
+		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionDrillDown');
+		assert.strictEqual(document.getText(editor.selection), '<span id="spanC"><span id="spanCB" class="btn"></span></span>');
+		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionNext');
+		assert.strictEqual(document.getText(editor.selection), '<span id="spanCB" class="btn"></span>');
+		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionNext');
+		const emptyContent = content.indexOf('</span>', content.indexOf('id="spanCB"'));
+		assert.strictEqual(editor.document.offsetAt(editor.selection.active), emptyContent);
+		assert.ok(editor.selection.isEmpty);
 		await vscode.commands.executeCommand('syntaxstitch.exitStructuralSelectionMode');
 	});
 
@@ -676,7 +699,6 @@ suite('Extension integration', () => {
 		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionNext');
 		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionComponents');
 		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionComponents');
-		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionNext');
 		assert.strictEqual(document.getText(editor.selection), 'btn');
 		await editor.edit(edit => edit.replace(editor.selection, 'class'));
 		await vscode.commands.executeCommand('syntaxstitch.exitStructuralSelectionTyping');
@@ -811,6 +833,29 @@ suite('Extension integration', () => {
 		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionDrillDown');
 		assert.strictEqual(document.getText(editor.selection), 'class');
 		assert.strictEqual(editor.document.offsetAt(editor.selection.start), content.indexOf('class="parent"'));
+		await vscode.commands.executeCommand('syntaxstitch.exitStructuralSelectionMode');
+	});
+
+	test('cycles component slots across heterogeneous sibling tags and wraps', async () => {
+		const content = '<button classes="btn" first="btnHello" aria-label="Say Hello">Yay</button><button classes="btn" first="btnCount" aria-label="Increment Counter">Yay</button><button classes="btn" first="btnReset" aria-label="Reset Counter">Yay</button><div class="output" id="output" aria-live="polite"></div>', document = await vscode.workspace.openTextDocument({ language: 'html', content }), editor = await vscode.window.showTextDocument(document);
+		const focusAriaLive = async () => {
+			editor.selection = new vscode.Selection(document.positionAt(0), document.positionAt(content.length));
+			await vscode.commands.executeCommand('syntaxstitch.enterStructuralSelectionMode');
+			for (let index = 0; index < 3; index++) { await vscode.commands.executeCommand('syntaxstitch.structuralSelectionDrillDown'); }
+			await vscode.commands.executeCommand('syntaxstitch.structuralSelectionComponents');
+			await vscode.commands.executeCommand('syntaxstitch.structuralSelectionComponents');
+			for (let index = 0; index < 4; index++) { await vscode.commands.executeCommand('syntaxstitch.structuralSelectionNext'); }
+			assert.strictEqual(document.getText(editor.selection), 'aria-live');
+		};
+		await focusAriaLive();
+		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionDrillUp');
+		assert.strictEqual(document.getText(editor.selection), 'aria-label');
+		assert.strictEqual(editor.document.offsetAt(editor.selection.start), content.lastIndexOf('aria-label'));
+		await vscode.commands.executeCommand('syntaxstitch.exitStructuralSelectionMode');
+		await focusAriaLive();
+		await vscode.commands.executeCommand('syntaxstitch.structuralSelectionDrillDown');
+		assert.strictEqual(document.getText(editor.selection), 'aria-label');
+		assert.strictEqual(editor.document.offsetAt(editor.selection.start), content.indexOf('aria-label'));
 		await vscode.commands.executeCommand('syntaxstitch.exitStructuralSelectionMode');
 	});
 

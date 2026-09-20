@@ -1,4 +1,6 @@
+import { PairMatcher } from './pairMatcher';
 import { randomUUID } from 'node:crypto';
+import { parseTagAt, type TagToken } from './markup';
 import type * as vscode from 'vscode';
 
 // region Types & State
@@ -33,34 +35,10 @@ const TAB_WIDTH = 4;
 // endregion
 
 // region Indexers
-type TagToken = { start: number; end: number; token: string; name: string; closing: boolean; selfClosing: boolean; quotes: { openIdx: number; closeIdx: number; token: string }[] };
 type TagOpen = Pick<TagToken, 'name' | 'start' | 'token'>;
 
 const pair = (openIdx: number, closeIdx: number, type: BlockType, openToken: string, closeToken: string, languageId: string): PendingPair => ({ openIdx, closeIdx, type, openToken, closeToken, languageId });
 const unmatchedCloser = (idx: number, token: string, languageId: string): PendingPair => ({ openIdx: idx, closeIdx: idx, type: 'brace', openToken: '', closeToken: token, languageId, unmatched: true });
-const parseTagAt = (text: string, start: number, end = text.length): TagToken | undefined => {
-	if (text[start] !== '<' || text.startsWith('<!--', start)) { return undefined; }
-	if (text.startsWith('<>', start)) { return { start, end: start + 2, token: '<>', name: '#fragment', closing: false, selfClosing: false, quotes: [] }; }
-	if (text.startsWith('</>', start)) { return { start, end: start + 3, token: '</>', name: '#fragment', closing: true, selfClosing: false, quotes: [] }; }
-	const head = text.slice(start, Math.min(end, start + 128)).match(/^<\s*(\/?)\s*([A-Za-z][\w:.-]*)/);
-	if (!head) { return undefined; }
-	let quote = '', escaped = false, cursor = start + head[0].length;
-	for (; cursor < end; cursor++) {
-		const char = text[cursor];
-		if (quote) { if (!escaped && char === quote) { quote = ''; } escaped = !escaped && char === '\\'; if (char !== '\\') { escaped = false; } continue; }
-		if (char === '"' || char === "'") { quote = char; continue; }
-		if (char !== '>') { continue; }
-		const token = text.slice(start, cursor + 1), quotes: TagToken['quotes'] = [];
-		let attributeQuote = '', openIdx = -1;
-		for (let idx = start + head[0].length; idx < cursor; idx++) {
-			const attributeChar = text[idx];
-			if (!attributeQuote && (attributeChar === '"' || attributeChar === "'")) { attributeQuote = attributeChar; openIdx = idx; continue; }
-			if (attributeQuote && attributeChar === attributeQuote) { quotes.push({ openIdx, closeIdx: idx, token: attributeQuote }); attributeQuote = ''; }
-		}
-		return { start, end: cursor + 1, token, name: head[2].toLowerCase(), closing: !!head[1], selfClosing: /\/\s*>$/.test(token), quotes };
-	}
-	return undefined;
-};
 const addTag = (tag: TagToken, stack: TagOpen[], pairs: PendingPair[], languageId: string): void => {
 	for (const quote of tag.quotes) { pairs.push(pair(quote.openIdx, quote.closeIdx, 'quote', quote.token, quote.token, languageId)); }
 	if (tag.closing) {
@@ -279,15 +257,21 @@ export class ShadowStructure implements IShadowStructure {
 	get pairs(): readonly TokenPair[] { return [...this.#pairs.values()].map(({ id, openIdx, closeIdx, type, languageId, openToken, closeToken }) => ({ id, openIdx, closeIdx, type, languageId, openToken, closeToken })); }
 
 	reindex(text: string, languageId = 'plaintext'): void {
-		const previous = [...this.#pairs.values()];
+		const identity = (pair: PendingPair): string => JSON.stringify([pair.type, pair.languageId, pair.type === 'tag' ? tagIdentity(pair.openToken) : pair.openToken, pair.type === 'tag' ? tagIdentity(pair.closeToken) : pair.closeToken]);
+		const groups = new Map<string, { value: PairRecord; order: number }[]>();
+		let order = 0;
+		for (const value of this.#pairs.values()) {
+			const key = identity(value), group = groups.get(key) ?? [];
+			group.push({ value, order: order++ }); groups.set(key, group);
+		}
+		const matchers = new Map([...groups].map(([key, group]) => [key, new PairMatcher(group)]));
 		const indexed = indexDocument(text, languageId);
 		this.#languageId = languageId;
 		this.#source = text;
 		this.#pairs.clear();
 		for (const pair of indexed) {
-			const candidates = previous.map((record, idx) => ({ record, idx })).filter(({ record }) => record.type === pair.type && record.languageId === pair.languageId && sameBoundary(record.openToken, pair.openToken, pair.type) && sameBoundary(record.closeToken, pair.closeToken, pair.type));
-			const match = candidates.sort((left, right) => Math.abs(left.record.openIdx - pair.openIdx) + Math.abs(left.record.closeIdx - pair.closeIdx) - Math.abs(right.record.openIdx - pair.openIdx) - Math.abs(right.record.closeIdx - pair.closeIdx))[0];
-			if (match) { previous.splice(match.idx, 1); this.#pairs.set(match.record.id, { ...pair, id: match.record.id }); } else { this.#addRecord(pair); }
+			const match = matchers.get(identity(pair))?.take(pair.openIdx, pair.closeIdx);
+			if (match) { this.#pairs.set(match.id, { ...pair, id: match.id }); } else { this.#addRecord(pair); }
 		}
 	}
 
@@ -348,7 +332,7 @@ export class ShadowStructure implements IShadowStructure {
 		const resultingPairs = new Map<BlockType, PendingPair[]>(), resultingUnmatched: PendingPair[] = [];
 		if (resultingText !== undefined) {
 			for (const candidate of indexDocument(resultingText, this.#languageId, true)) {
-				if (candidate.unmatched) { resultingUnmatched.push(candidate); } else { resultingPairs.set(candidate.type, [...(resultingPairs.get(candidate.type) ?? []), candidate]); }
+				if (candidate.unmatched) { resultingUnmatched.push(candidate); } else { const group = resultingPairs.get(candidate.type) ?? []; group.push(candidate); resultingPairs.set(candidate.type, group); }
 			}
 		}
 		if (resultingText !== undefined) {

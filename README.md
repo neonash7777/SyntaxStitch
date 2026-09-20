@@ -101,6 +101,10 @@ When a normal forward selection is extended one character at a time with `Shift+
 
 ## Nested Select
 
+Click the SyntaxStitch status-bar icon and choose **Nested Select Tutorial** near the bottom of its action menu, or run **SyntaxStitch: Nested Select Tutorial** from the Command Palette. It opens a new unsaved HTML document with three `div → span → span` examples already selected, distinct attributes on every outer and inner span, and instructions at the top. Press **Option+Command+Return** on macOS or **Ctrl+Alt+S** on Windows/Linux to start. The tutorial is also available in VS Code's Getting Started walkthroughs.
+
+While Nested Select is active, its status item shows the edit scope and matching target count. Dashed outlines mark the affected ranges. Hover the status item for shortcuts; click it to choose **Original selection**, **Enclosing structure**, or **Entire document**. Original selection is the default. The enclosing structure is the nearest strict container of the initial selection, with the selection itself as a fallback. These bounds follow edits and remain independent of navigation.
+
 Nested Select turns a highlighted region into a set of structural selections you can explore and edit from the keyboard. Use **SyntaxStitch: Enter Nested Select** to start this interactive mode. The separate **Select Matching Structure** and **Select Inner Structure** commands expand or contract a normal editor selection.
 
 ### Start with a selection
@@ -157,9 +161,13 @@ Attribute-clause expansion selects the complete source text, such as `class="pri
 
 For markup edits, matching uses the **attribute key and tag name**: a button's `class` value updates other buttons' `class` values, even if their attributes are ordered differently. In Nested Select peer navigation, a selected property name cycles by key, while a selected value cycles only among peers with the same key and value. Editing `aria-label`, `title`, or `data-*` values must not overwrite an `id` or a different attribute key. An element without the matching key is skipped.
 
-Matching currently considers elements with the same tag name throughout the document, including those outside the initial highlighted region. It does not require their previous attribute values to match. Property-name edits use the corresponding attribute position instead; this is distinct from matching values by key. Automatic value propagation currently skips changes containing whitespace, so use a single-token value such as `primary` for this workflow.
+Matching considers complete elements inside the chosen edit scope. The default is the original highlighted region; choose **Entire document** to include matching elements outside it. It does not require their previous attribute values to match. Attribute-name edits follow the original key even when attributes are reordered. Peers missing that key, or already containing the new name, are skipped. Quoted values can contain spaces and angle brackets; typing and pasting use the same matching rules. Mirroring escapes a destination quote when needed and quotes previously unquoted peer values when required.
 
-When finishing an HTML `id` value edit with `Enter`, participating IDs receive numbered suffixes in document order, such as `test_1`, `test_2`, and `test_3`. This finalization applies only to the `id` key. Other attribute values are not numbered. This is not a document-wide ID uniqueness validator.
+When finishing an HTML `id` value edit with `Enter`, participating IDs inside the chosen scope receive numbered suffixes in document order, such as `test_1`, `test_2`, and `test_3`. This finalization applies only to the `id` key. Other attribute values are not numbered. Generated suffixes skip IDs already used anywhere else in the document, including void elements and encoded attribute values. Existing unrelated IDs remain unchanged; pre-existing duplicates and references such as `for` or `href` are not rewritten.
+
+Mirrored edits apply automatically after a 100 ms typing pause; **Enter** applies any pending edit immediately and finishes typing. Each pending edit keeps its originating selection session, document version, and exact targets. Navigating before it applies does not redirect it. Conflicting edits, a new selection session, pause, or closing the document cancel stale work.
+
+**Undo cancels queued edits immediately.** Native typing and its automatic mirrored changes share an undo group where the editor permits it. Undo/redo exits Nested Select and never schedules new repairs or mirrored changes. Scripted edits from other extensions may create their own undo stops.
 
 Automatic repairs require an open editor tab. Closing the tab cancels queued attribute edits, and reverting or reloading saved content does not trigger repairs that make the file dirty again.
 
@@ -175,6 +183,16 @@ If SyntaxStitch saves you time, you can support its development:
 
 [![Support with Venmo](https://img.shields.io/badge/Venmo-@neonash7777-008CFF?style=for-the-badge&logo=venmo&logoColor=white)](https://venmo.com/u/neonash7777)
 [![Support with Cash App](https://img.shields.io/badge/Cash_App-$neonash7777-00D64F?style=for-the-badge&logo=cashapp&logoColor=white)](https://cash.app/$neonash7777)
+
+## Staying in control
+
+- **Pause / Resume This File** suspends automatic edits for the current document until you resume it or close the document. Other documents keep their own state. Resuming builds a fresh index from the current text.
+- **Skip Next Edit / Cancel Skip** leaves the next text-change event in this file unchanged, including all changes in a multi-cursor batch. It is consumed even when the edit would not need repair. Run it again before editing to cancel. The status item shows when it is armed.
+- Both controls cancel queued mirrored changes and exit Nested Select. They do not revert changes already applied.
+- **Show Recent Repairs** lists the last 100 applied structural repairs in this session, including repeats suppressed by the statistics cooldown. Each entry explains the rule and opens its recorded file and line. Locations may shift after later edits. **Clear Recent Repairs** clears this history separately from statistics.
+- Undo, redo, disk reloads, and reverts reindex the document without applying fresh repairs or mirrored edits. Undo/redo exits Nested Select so queued edits cannot replay.
+
+Recent-repair history is held in memory, contains no source snippets, and resets when the extension host restarts. Existing statistics and output logging retain their documented behavior.
 
 ## Commands
 
@@ -193,6 +211,7 @@ If SyntaxStitch saves you time, you can support its development:
 ## Settings
 
 - `syntaxstitch.enabled` enables automatic reconciliation.
+- `syntaxstitch.mirroringScope` chooses the initial Nested Select scope: `selection` (default), `enclosing`, or `document`. The status-bar scope picker changes only the current Nested Select session.
 - `syntaxstitch.pairLabels` displays virtual opening-declaration labels at matching closing braces and tags. It defaults to `all` for multiline boundaries.
 - `syntaxstitch.fixClosingIndentation` aligns changed line-leading `}` tokens with their matched `{`. It defaults to `true`.
 - `syntaxstitch.structures` selects repair families: `parenthesis` for `()`, `square` for `[]`, `curly` for `{}`, plus `quote`, `tag`, and `indent`. All are enabled by default. The legacy `brace` value remains supported as an umbrella for all three bracket families.
@@ -203,6 +222,8 @@ If SyntaxStitch saves you time, you can support its development:
 - `syntaxstitch.repairCountCooldownMs` prevents immediate retries on the same boundary from inflating statistics. It defaults to 5000 ms; use `0` to count every application.
 
 ## Development
+
+Pull requests run type checking, lint, scanner/scope unit tests, and editor-host integration tests on Linux, macOS, and Windows against VS Code 1.127.0 and stable. Release checks also run the unit suite.
 
 ```sh
 npm run compile
@@ -244,3 +265,9 @@ The stable VS Code extension API does not expose a hook that can block or mutate
 The same change event does not identify whether an edit came from AI, another extension, paste, or another programmatic source. SyntaxStitch recognizes edits routed through its own keyboard commands, but it does not label other edits as AI without a reliable source signal.
 
 SyntaxStitch protects indexed structural pairs with a lightweight context-aware scanner; it is not a full language parser, formatter, linter, or substitute for source control. Embedded language detection currently covers script/style blocks, JavaScript template markup, and JSX/TSX. Review repaired edits just as you would review edits from any other coding tool.
+
+### Saving and competing edits
+
+Saving finishes queued mirrored edits and exits Nested Select before save formatting proceeds. The status bar briefly shows how many matches are updating; cancelled work reports that the document or selection changed. Multi-cursor batches, edits outside the focused component, and whole-document replacements cancel the old session rather than reuse its targets.
+
+The tutorial includes automatic-update and undo/redo exercises. Reopen **Nested Select Tutorial** from the action menu for a fresh practice document.

@@ -4,7 +4,37 @@ All notable changes to SyntaxStitch are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.0.8 - 2026-09-20
+
+### Added
+
+- Pending mirrored-edit progress and cancellation feedback, plus tutorial exercises for automatic updates and undo/redo.
+- Compatibility regressions for save formatting, streamed replacements, snippets, multiple cursors, and competing tag renames.
+
+- Per-document pause/resume and a cancellable one-edit repair bypass, with status feedback and queued-edit cancellation.
+- Nested Select scope picker, matching-target outlines/count, and contextual keyboard hints.
+- A Nested Select Tutorial near the bottom of the action menu: a new unsaved document with three preselected div/span/span examples, varied attributes, platform-specific entry shortcuts, and navigation instructions; also available as a Getting Started walkthrough.
+- Session-only recent repair history with explanations, recorded locations, and a separate clear command.
+- Pull-request checks for unit and editor-host tests on Windows, macOS, and Linux, against minimum and stable VS Code versions; unit tests in the release workflow.
+
+### Fixed
+
+- Finish pending mirrored edits before saving and leave Nested Select so subsequent formatting cannot use stale targets.
+
+- Match attribute renames by their original key instead of attribute position; skip duplicate-name collisions.
+- Share quote-aware markup parsing across indexing, navigation and editing, preserving `>` inside quoted values.
+- Apply captured mirrored edits automatically after a typing pause; cancel stale work on undo/redo, conflicting edits and session changes, including split panes.
+- Handle multiword attribute values consistently for typing and paste, with safe quoting for peer values.
+- Avoid generated HTML ID collisions with untouched elements, including void elements and encoded IDs.
+- Replace repeated whole-bucket pair sorting with indexed nearest-boundary matching while preserving ownership decisions.
+- Add regressions for dense code, parser edge cases, automatic apply and repeated undo/redo.
+
+### Changed
+
+- Mirrored edits and HTML ID numbering default to the original selection. Choose enclosing structure or entire document to expand their scope.
+- Undo/redo cancel pending mirrored edits and exit Nested Select without triggering repairs.
+- Index newly visible documents before their first edit and reuse unchanged document versions during navigation.
+- Separate scope policy, repair statistics, statistics presentation, repair history, and practice-file code from extension lifecycle code.
 
 ## 0.0.6 - 2026-09-19
 

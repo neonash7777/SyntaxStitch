@@ -1,0 +1,53 @@
+name: Check Extension
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        vscode: ['1.127.0', stable]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run compile
+      - run: npm run test:unit
+      - name: Editor integration tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm test
+        env:
+          VSCODE_TEST_VERSION: ${{ matrix.vscode }}
+      - name: Editor integration tests (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: npm test
+        env:
+          VSCODE_TEST_VERSION: ${{ matrix.vscode }}
+
+  release-candidate:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx vsce package --out syntaxstitch-candidate.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: syntaxstitch-candidate
+          path: syntaxstitch-candidate.vsix

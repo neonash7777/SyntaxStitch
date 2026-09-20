@@ -2,7 +2,7 @@
   "name": "syntaxstitch",
   "displayName": "SyntaxStitch",
   "description": "Cross-platform support for VS Code on Windows, macOS, and Linux. Stops mismatched brackets, quotes, tags, and indentation from turning AI edits into cascading syntax failures, with Nested Select for faster structured editing.",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "BrockNash",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -117,6 +117,30 @@
       {
         "command": "syntaxstitch.showOutput",
         "title": "SyntaxStitch: Show Reconciliation Output"
+      },
+      {
+        "command": "syntaxstitch.toggleFilePause",
+        "title": "SyntaxStitch: Pause / Resume This File"
+      },
+      {
+        "command": "syntaxstitch.skipNextRepair",
+        "title": "SyntaxStitch: Skip Next Edit / Cancel Skip"
+      },
+      {
+        "command": "syntaxstitch.chooseMirroringScope",
+        "title": "SyntaxStitch: Choose Mirrored Edit Scope"
+      },
+      {
+        "command": "syntaxstitch.showRecentRepairs",
+        "title": "SyntaxStitch: Show Recent Repairs"
+      },
+      {
+        "command": "syntaxstitch.clearRecentRepairs",
+        "title": "SyntaxStitch: Clear Recent Repairs"
+      },
+      {
+        "command": "syntaxstitch.openPractice",
+        "title": "SyntaxStitch: Nested Select Tutorial"
       }
     ],
     "keybindings": [
@@ -319,9 +343,64 @@
           "maximum": 60000,
           "default": 5000,
           "description": "Time in milliseconds during which repeated repairs of the same boundary count as one incident. Set to 0 to count every repair."
+        },
+        "syntaxstitch.mirroredEditDelayMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000,
+          "default": 100,
+          "description": "Delay in milliseconds before Nested Select applies mirrored edits automatically. Saving flushes queued edits immediately."
+        },
+        "syntaxstitch.mirroringScope": {
+          "type": "string",
+          "enum": [
+            "selection",
+            "enclosing",
+            "document"
+          ],
+          "enumDescriptions": [
+            "Only structures contained in the original selection.",
+            "Structures inside the nearest enclosing structure captured on entry; falls back to the selection.",
+            "Matching structures anywhere in the document."
+          ],
+          "default": "selection",
+          "description": "Initial scope for Nested Select mirrored edits. Change the current session scope by clicking the Nested Select status item."
         }
       }
-    }
+    },
+    "walkthroughs": [
+      {
+        "id": "syntaxstitch.getStarted",
+        "title": "Nested Select Tutorial",
+        "description": "Learn structured navigation and see exactly where matching edits apply.",
+        "steps": [
+          {
+            "id": "practice",
+            "title": "Open the practice file",
+            "description": "Explore three nested div/span/span examples in a preselected, unsaved HTML document.\n[Open tutorial](command:syntaxstitch.openPractice)",
+            "completionEvents": [
+              "onCommand:syntaxstitch.openPractice"
+            ]
+          },
+          {
+            "id": "scope",
+            "title": "Choose where edits apply",
+            "description": "The original selection is the default. Click the Nested Select status item to choose the enclosing structure or the entire document. Dashed outlines preview the affected ranges.",
+            "completionEvents": [
+              "onCommand:syntaxstitch.chooseMirroringScope"
+            ]
+          },
+          {
+            "id": "control",
+            "title": "Stay in control of repairs",
+            "description": "Use the SyntaxStitch action menu to pause this file or skip the next edit. Recent Repairs explains automatic structural changes.\n[Open actions](command:syntaxstitch.showMenu)",
+            "completionEvents": [
+              "onCommand:syntaxstitch.showMenu"
+            ]
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
@@ -361,5 +440,8 @@
   "overrides": {
     "diff": "^8.0.4",
     "serialize-javascript": "^7.0.6"
+  },
+  "dependencies": {
+    "entities": "^4.5.0"
   }
 }

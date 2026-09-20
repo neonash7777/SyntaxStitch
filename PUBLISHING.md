@@ -32,8 +32,8 @@ npm run package:vsix
 
 Current release artifact:
 
-- File: `syntaxstitch-0.0.7.vsix`
-- SHA256: `0bf0e26cf53d54bff2e97a5d0fa548e81cf8bae755ac83c8150590e6bb8ebc0e`
+- File: `syntaxstitch-0.0.8.vsix`
+- SHA256: `0565a5ce88053e8074c817af3e3d8f3df8aee7261346f6c87784ce82f82e1c8e`
 
 This checksum can be used to verify the packaged extension before installation or distribution.
 
